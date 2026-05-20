@@ -54,6 +54,9 @@ func (p *OpenAIProvider) runStream(
 	var stopReason string
 
 	for stream.Next() {
+		if ctx.Err() != nil {
+			return
+		}
 		chunk := stream.Current()
 		acc.AddChunk(chunk)
 

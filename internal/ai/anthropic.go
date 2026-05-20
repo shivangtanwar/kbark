@@ -65,6 +65,14 @@ func (p *AnthropicProvider) runStream(
 	message := anthropic.Message{}
 
 	for stream.Next() {
+		// Defensive ctx check: the SDK does not proactively bail out of
+		// stream.Next() when ctx is cancelled mid-stream — it keeps
+		// processing SSE ping keep-alives indefinitely. Checking ctx
+		// after each event guarantees we exit within one ping interval
+		// (~15s) of cancellation regardless of SDK behaviour.
+		if ctx.Err() != nil {
+			return
+		}
 		ev := stream.Current()
 		if err := message.Accumulate(ev); err != nil {
 			// Accumulation failures are non-fatal for the user; the
