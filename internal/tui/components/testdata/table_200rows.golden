@@ -1,0 +1,25 @@
+NAME            READY  STATUS      RESTARTS  AGE     
+─────────────────────────────────────────────────────
+ pod-001           1/1      Running       0           1m                        
+ pod-002           1/1      Pending       1           2m                        
+ pod-003           1/1      Failed        2           3m                        
+ pod-004           1/1      Succeeded     0           4m                        
+ pod-005           1/1      Unknown       1           5m                        
+ pod-006           1/1      Running       2           6m                        
+ pod-007           1/1      Pending       0           7m                        
+ pod-008           1/1      Failed        1           8m                        
+ pod-009           1/1      Succeeded     2           9m                        
+ pod-010           1/1      Unknown       0           10m                       
+ pod-011           1/1      Running       1           11m                       
+ pod-012           1/1      Pending       2           12m                       
+ pod-013           1/1      Failed        0           13m                       
+ pod-014           1/1      Succeeded     1           14m                       
+ pod-015           1/1      Unknown       2           15m                       
+ pod-016           1/1      Running       0           16m                       
+ pod-017           1/1      Pending       1           17m                       
+ pod-018           1/1      Failed        2           18m                       
+ pod-019           1/1      Succeeded     0           19m                       
+ pod-020           1/1      Unknown       1           20m                       
+ pod-021           1/1      Running       2           21m                       
+ pod-022           1/1      Pending       0           22m                       
+ pod-023           1/1      Failed        1           23m                       
