@@ -10,7 +10,9 @@ func New(name string) (Provider, error) {
 	switch name {
 	case "anthropic":
 		return NewAnthropic()
+	case "openai":
+		return NewOpenAI()
 	default:
-		return nil, fmt.Errorf("unknown provider %q (supported: anthropic)", name)
+		return nil, fmt.Errorf("unknown provider %q (supported: anthropic, openai)", name)
 	}
 }
