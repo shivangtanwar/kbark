@@ -4,6 +4,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 
@@ -37,10 +38,22 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req Request) (<-chan Eve
 	if req.System != "" {
 		params.System = []anthropic.TextBlockParam{{Text: req.System}}
 	}
+	if len(req.Tools) > 0 {
+		params.Tools = buildAnthropicTools(req.Tools)
+	}
 
 	events := make(chan Event, 8)
 	go p.runStream(ctx, params, events)
 	return events, nil
+}
+
+// pendingToolUse accumulates a tool_use block's incremental input JSON as
+// ContentBlockDeltaEvent / InputJSONDelta events arrive. The fully-formed
+// ToolCallEvent is emitted on ContentBlockStopEvent for that block.
+type pendingToolUse struct {
+	id        string
+	name      string
+	inputJSON strings.Builder
 }
 
 func (p *AnthropicProvider) runStream(
@@ -52,19 +65,48 @@ func (p *AnthropicProvider) runStream(
 
 	stream := p.client.Messages.NewStreaming(ctx, params)
 	var stopReason string
+	var current *pendingToolUse
 
 	for stream.Next() {
 		ev := stream.Current()
 		switch evt := ev.AsAny().(type) {
+
 		case anthropic.MessageDeltaEvent:
 			if string(evt.Delta.StopReason) != "" {
 				stopReason = string(evt.Delta.StopReason)
 			}
+
+		case anthropic.ContentBlockStartEvent:
+			if tu, ok := evt.ContentBlock.AsAny().(anthropic.ToolUseBlock); ok {
+				current = &pendingToolUse{id: tu.ID, name: tu.Name}
+			}
+
 		case anthropic.ContentBlockDeltaEvent:
-			if delta, ok := evt.Delta.AsAny().(anthropic.TextDelta); ok {
+			switch delta := evt.Delta.AsAny().(type) {
+			case anthropic.TextDelta:
 				if !sendEvent(ctx, out, TextDeltaEvent{Delta: delta.Text}) {
 					return
 				}
+			case anthropic.InputJSONDelta:
+				if current != nil {
+					current.inputJSON.WriteString(delta.PartialJSON)
+				}
+			}
+
+		case anthropic.ContentBlockStopEvent:
+			if current != nil {
+				args := current.inputJSON.String()
+				if args == "" {
+					args = "{}"
+				}
+				if !sendEvent(ctx, out, ToolCallEvent{
+					ID:        current.id,
+					Name:      current.name,
+					Arguments: args,
+				}) {
+					return
+				}
+				current = nil
 			}
 		}
 	}
@@ -90,14 +132,78 @@ func sendEvent(ctx context.Context, out chan<- Event, e Event) bool {
 func buildAnthropicMessages(in []Message) []anthropic.MessageParam {
 	out := make([]anthropic.MessageParam, 0, len(in))
 	for _, m := range in {
+		blocks := buildAnthropicBlocks(m)
+		if len(blocks) == 0 {
+			continue
+		}
 		switch m.Role {
 		case RoleUser:
-			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+			out = append(out, anthropic.NewUserMessage(blocks...))
 		case RoleAssistant:
-			out = append(out, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))
+			out = append(out, anthropic.NewAssistantMessage(blocks...))
 		}
 	}
 	return out
+}
+
+func buildAnthropicBlocks(m Message) []anthropic.ContentBlockParamUnion {
+	blocks := make([]anthropic.ContentBlockParamUnion, 0, 1+len(m.ToolUses)+len(m.ToolResults))
+	if m.Content != "" {
+		blocks = append(blocks, anthropic.NewTextBlock(m.Content))
+	}
+	for _, tu := range m.ToolUses {
+		var input any
+		if tu.Arguments != "" {
+			_ = json.Unmarshal([]byte(tu.Arguments), &input)
+		}
+		if input == nil {
+			input = map[string]any{}
+		}
+		blocks = append(blocks, anthropic.NewToolUseBlock(tu.ID, input, tu.Name))
+	}
+	for _, tr := range m.ToolResults {
+		blocks = append(blocks, anthropic.NewToolResultBlock(tr.ToolCallID, tr.Content, tr.IsError))
+	}
+	return blocks
+}
+
+func buildAnthropicTools(in []Tool) []anthropic.ToolUnionParam {
+	out := make([]anthropic.ToolUnionParam, len(in))
+	for i, t := range in {
+		props, _ := t.Schema["properties"].(map[string]any)
+		out[i] = anthropic.ToolUnionParam{
+			OfTool: &anthropic.ToolParam{
+				Name:        t.Name,
+				Description: anthropic.String(t.Description),
+				InputSchema: anthropic.ToolInputSchemaParam{
+					Type:       "object",
+					Properties: props,
+					Required:   extractRequiredFromSchema(t.Schema),
+				},
+			},
+		}
+	}
+	return out
+}
+
+// extractRequiredFromSchema pulls the "required" key out of a JSON schema
+// map. Schemas authored as Go literals tend to declare it as []string,
+// but Schemas round-tripped through json.Unmarshal end up as []any.
+// Both shapes need to work.
+func extractRequiredFromSchema(schema map[string]any) []string {
+	switch r := schema["required"].(type) {
+	case []string:
+		return r
+	case []any:
+		out := make([]string, 0, len(r))
+		for _, v := range r {
+			if s, ok := v.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // classifyAnthropicError promotes well-known errors to typed forms so the
@@ -107,10 +213,6 @@ func classifyAnthropicError(err error) error {
 		return nil
 	}
 	msg := err.Error()
-	// The SDK's error message includes the HTTP status. Cheap classification
-	// via substring is robust enough for our use; the alternative would be
-	// type-asserting on the SDK's internal error type which is more brittle
-	// across SDK upgrades.
 	switch {
 	case strings.Contains(msg, "429"), strings.Contains(strings.ToLower(msg), "rate_limit"):
 		return &RateLimitError{Provider: "anthropic", Detail: msg}
