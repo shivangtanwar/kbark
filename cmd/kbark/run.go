@@ -25,13 +25,9 @@ func init() {
 		defaultProfile(),
 		"Configuration profile (dev/staging/prod)",
 	)
-	// Running `kbark` with no subcommand launches the TUI. Subcommands
-	// like `kbark version` and `kbark doctor` continue to work as before.
 	rootCmd.RunE = runTUI
 }
 
-// defaultProfile honours KBARK_PROFILE so the user can change profile
-// without re-typing the flag every invocation.
 func defaultProfile() string {
 	if v := os.Getenv("KBARK_PROFILE"); v != "" {
 		return v
@@ -49,13 +45,13 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	}
 
 	namespace, _, _ := kubeFlags.ToRawKubeConfigLoader().Namespace()
-	factory := kube.NewFactory(clientset, namespace, kube.DefaultResyncInterval)
-	lister := kube.NewPodLister(factory)
-	if err := lister.Start(ctx); err != nil {
+	service := kube.NewPodService(clientset, kube.DefaultResyncInterval, ctx)
+	snapshots, done, err := service.Switch(namespace)
+	if err != nil {
 		return fmt.Errorf("start pod informer: %w", err)
 	}
 
-	model := tui.NewModel(kubeFlags, profileFlag, lister.Snapshots())
+	model := tui.NewModel(kubeFlags, profileFlag, service, snapshots, done)
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),

@@ -6,18 +6,21 @@
 package tui
 
 import (
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
+	"github.com/shivangtanwar/kbark/internal/kube"
 	"github.com/shivangtanwar/kbark/internal/tui/components"
 	"github.com/shivangtanwar/kbark/internal/tui/theme"
 	"github.com/shivangtanwar/kbark/internal/tui/views"
 )
 
-// Model is the root bubbletea model. It embeds whichever resource view
-// is currently active (only PodView in M1) and renders the persistent
-// footer beneath it.
+// Model is the root bubbletea model. It owns the resource view, the
+// command bar, the persistent footer, and the PodService that switches
+// namespace-scoped listers under the hood.
 type Model struct {
 	width, height int
 
@@ -29,17 +32,25 @@ type Model struct {
 	namespace   string
 
 	podView   views.PodView
+	cmdbar    components.Cmdbar
+	service   *kube.PodService
 	snapshots <-chan []*corev1.Pod
+	done      <-chan struct{}
 
 	footer components.Footer
 	keys   KeyMap
 	th     theme.Theme
 }
 
-// NewModel constructs the root TUI model. `snapshots` is the channel the
-// kube package's PodLister writes to; pass nil during tests that don't
-// exercise the data path.
-func NewModel(flags *genericclioptions.ConfigFlags, profile string, snapshots <-chan []*corev1.Pod) Model {
+// NewModel constructs the root model. Pass nil `service` (and nil
+// snapshots/done) for tests that don't exercise the data path.
+func NewModel(
+	flags *genericclioptions.ConfigFlags,
+	profile string,
+	service *kube.PodService,
+	snapshots <-chan []*corev1.Pod,
+	done <-chan struct{},
+) Model {
 	ctx, ns := resolveContextAndNamespace(flags)
 	th := theme.Default()
 	return Model{
@@ -49,7 +60,10 @@ func NewModel(flags *genericclioptions.ConfigFlags, profile string, snapshots <-
 		contextName: ctx,
 		namespace:   ns,
 		podView:     views.NewPodView(th),
+		cmdbar:      components.NewCmdbar(th),
+		service:     service,
 		snapshots:   snapshots,
+		done:        done,
 		footer:      components.NewFooter(th),
 		keys:        DefaultKeyMap(),
 		th:          th,
@@ -60,7 +74,7 @@ func (m Model) Init() tea.Cmd {
 	if m.snapshots == nil {
 		return nil
 	}
-	return waitForPods(m.snapshots)
+	return waitForPods(m.snapshots, m.done)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -72,59 +86,120 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		if keyMatches(msg, m.keys.Quit) {
-			return m, tea.Quit
-		}
-		// Forward navigation keys to the pod view (table scrolling).
-		var cmd tea.Cmd
-		m.podView, cmd = m.podView.Update(msg)
-		return m, cmd
+		return m.handleKey(msg)
 
 	case PodsUpdatedMsg:
 		m.podView = m.podView.SetPods(msg.Pods)
-		// Keep listening for the next snapshot.
-		return m, waitForPods(m.snapshots)
+		return m, waitForPods(m.snapshots, m.done)
 
 	case NamespaceChangedMsg:
-		m.namespace = msg.Namespace
-		return m, nil
+		return m.handleNamespaceChange(msg.Namespace)
 	}
 	return m, nil
+}
+
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.cmdbar.Active() {
+		switch msg.String() {
+		case "enter":
+			return m.submitCmd()
+		case "esc":
+			m.cmdbar = m.cmdbar.Deactivate()
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.cmdbar, cmd = m.cmdbar.Update(msg)
+			return m, cmd
+		}
+	}
+	if keyMatches(msg, m.keys.Quit) {
+		return m, tea.Quit
+	}
+	if keyMatches(msg, m.keys.Command) {
+		m.cmdbar = m.cmdbar.Activate()
+		m.podView = m.podView.SetSize(m.width, m.contentHeight())
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.podView, cmd = m.podView.Update(msg)
+	return m, cmd
+}
+
+func (m Model) submitCmd() (Model, tea.Cmd) {
+	input := strings.TrimSpace(m.cmdbar.Value())
+	parts := strings.Fields(input)
+	if len(parts) == 2 && parts[0] == "ns" {
+		m.cmdbar = m.cmdbar.Deactivate()
+		m.podView = m.podView.SetSize(m.width, m.contentHeight())
+		ns := parts[1]
+		return m, func() tea.Msg { return NamespaceChangedMsg{Namespace: ns} }
+	}
+	m.cmdbar = m.cmdbar.SetError("unknown: " + input)
+	return m, nil
+}
+
+func (m Model) handleNamespaceChange(namespace string) (Model, tea.Cmd) {
+	if m.service == nil {
+		// Tests / headless mode: just record the rename, no lister churn.
+		m.namespace = namespace
+		return m, nil
+	}
+	ch, done, err := m.service.Switch(namespace)
+	if err != nil {
+		m.cmdbar = m.cmdbar.Activate().SetError("switch failed: " + err.Error())
+		return m, nil
+	}
+	m.namespace = namespace
+	m.snapshots = ch
+	m.done = done
+	m.podView = m.podView.SetPods(nil)
+	return m, waitForPods(ch, done)
 }
 
 func (m Model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return ""
 	}
-	content := m.podView.View()
-	foot := m.footer.View(m.width, components.FooterData{
+	parts := []string{m.podView.View()}
+	if m.cmdbar.Active() {
+		parts = append(parts, m.cmdbar.View(m.width))
+	}
+	parts = append(parts, m.footer.View(m.width, components.FooterData{
 		Context:   m.contextName,
 		Namespace: m.namespace,
 		Profile:   m.profile,
 		Mode:      m.mode,
 		Help:      "q quit · : cmd · ? AI",
-	})
-	return content + "\n" + foot
+	}))
+	return strings.Join(parts, "\n")
 }
 
 func (m Model) contentHeight() int {
-	h := m.height - 1
+	h := m.height - 1 // footer
+	if m.cmdbar.Active() {
+		h-- // cmdbar above footer
+	}
 	if h < 0 {
 		return 0
 	}
 	return h
 }
 
-// waitForPods blocks on the snapshot channel and converts each receive
-// into a PodsUpdatedMsg. After handling, Update returns this Cmd again
-// to keep the bridge alive for the next snapshot.
-func waitForPods(ch <-chan []*corev1.Pod) tea.Cmd {
+// waitForPods blocks on the snapshot channel until either a snapshot
+// arrives (PodsUpdatedMsg) or the done channel closes (no-op return).
+// The done branch is what lets old waitForPods Cmds exit cleanly when
+// PodService.Switch tears down the previous namespace's lister.
+func waitForPods(ch <-chan []*corev1.Pod, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
-		pods, ok := <-ch
-		if !ok {
+		select {
+		case pods, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			return PodsUpdatedMsg{Pods: pods}
+		case <-done:
 			return nil
 		}
-		return PodsUpdatedMsg{Pods: pods}
 	}
 }
 
