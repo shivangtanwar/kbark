@@ -45,13 +45,14 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	}
 
 	namespace, _, _ := kubeFlags.ToRawKubeConfigLoader().Namespace()
-	service := kube.NewPodService(clientset, kube.DefaultResyncInterval, ctx)
-	snapshots, done, err := service.Switch(namespace)
+	podService := kube.NewPodService(clientset, kube.DefaultResyncInterval, ctx)
+	podsCh, podsDone, err := podService.Switch(namespace)
 	if err != nil {
 		return fmt.Errorf("start pod informer: %w", err)
 	}
+	logService := kube.NewLogService(clientset, ctx)
 
-	model := tui.NewModel(kubeFlags, profileFlag, service, snapshots, done)
+	model := tui.NewModel(kubeFlags, profileFlag, podService, podsCh, podsDone, logService)
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),
