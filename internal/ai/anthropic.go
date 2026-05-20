@@ -47,15 +47,6 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req Request) (<-chan Eve
 	return events, nil
 }
 
-// pendingToolUse accumulates a tool_use block's incremental input JSON as
-// ContentBlockDeltaEvent / InputJSONDelta events arrive. The fully-formed
-// ToolCallEvent is emitted on ContentBlockStopEvent for that block.
-type pendingToolUse struct {
-	id        string
-	name      string
-	inputJSON strings.Builder
-}
-
 func (p *AnthropicProvider) runStream(
 	ctx context.Context,
 	params anthropic.MessageNewParams,
@@ -64,49 +55,29 @@ func (p *AnthropicProvider) runStream(
 	defer close(out)
 
 	stream := p.client.Messages.NewStreaming(ctx, params)
-	var stopReason string
-	var current *pendingToolUse
+
+	// message accumulates ALL stream events into the final assembled
+	// response. After the stream closes, message.Content holds the
+	// finished text and tool_use blocks regardless of how they were
+	// chunked across SDK events — far more reliable than trying to
+	// type-switch on ContentBlockStartEvent / ContentBlockStopEvent
+	// (whose exact shape varies across SDK versions).
+	message := anthropic.Message{}
 
 	for stream.Next() {
 		ev := stream.Current()
-		switch evt := ev.AsAny().(type) {
-
-		case anthropic.MessageDeltaEvent:
-			if string(evt.Delta.StopReason) != "" {
-				stopReason = string(evt.Delta.StopReason)
-			}
-
-		case anthropic.ContentBlockStartEvent:
-			if tu, ok := evt.ContentBlock.AsAny().(anthropic.ToolUseBlock); ok {
-				current = &pendingToolUse{id: tu.ID, name: tu.Name}
-			}
-
-		case anthropic.ContentBlockDeltaEvent:
-			switch delta := evt.Delta.AsAny().(type) {
-			case anthropic.TextDelta:
+		if err := message.Accumulate(ev); err != nil {
+			// Accumulation failures are non-fatal for the user; the
+			// stream itself can keep running.
+			continue
+		}
+		// Forward only text deltas in real time; tool calls are emitted
+		// once at end-of-stream from the accumulated message.
+		if evt, ok := ev.AsAny().(anthropic.ContentBlockDeltaEvent); ok {
+			if delta, ok := evt.Delta.AsAny().(anthropic.TextDelta); ok {
 				if !sendEvent(ctx, out, TextDeltaEvent{Delta: delta.Text}) {
 					return
 				}
-			case anthropic.InputJSONDelta:
-				if current != nil {
-					current.inputJSON.WriteString(delta.PartialJSON)
-				}
-			}
-
-		case anthropic.ContentBlockStopEvent:
-			if current != nil {
-				args := current.inputJSON.String()
-				if args == "" {
-					args = "{}"
-				}
-				if !sendEvent(ctx, out, ToolCallEvent{
-					ID:        current.id,
-					Name:      current.name,
-					Arguments: args,
-				}) {
-					return
-				}
-				current = nil
 			}
 		}
 	}
@@ -115,7 +86,37 @@ func (p *AnthropicProvider) runStream(
 		sendEvent(ctx, out, ErrorEvent{Err: classifyAnthropicError(err)})
 		return
 	}
-	sendEvent(ctx, out, DoneEvent{StopReason: stopReason})
+
+	// Emit one ToolCallEvent per tool_use block in the assembled message.
+	for _, block := range message.Content {
+		if tu, ok := block.AsAny().(anthropic.ToolUseBlock); ok {
+			args := marshalToolInput(tu.Input)
+			if !sendEvent(ctx, out, ToolCallEvent{
+				ID:        tu.ID,
+				Name:      tu.Name,
+				Arguments: args,
+			}) {
+				return
+			}
+		}
+	}
+	sendEvent(ctx, out, DoneEvent{StopReason: string(message.StopReason)})
+}
+
+// marshalToolInput turns an arbitrary input value back into a JSON string
+// for our cross-provider ToolCallEvent.Arguments contract. Failing back
+// to "{}" keeps downstream consumers from choking on a malformed call.
+func marshalToolInput(input any) string {
+	if input == nil {
+		return "{}"
+	}
+	if raw, ok := input.(json.RawMessage); ok && len(raw) > 0 {
+		return string(raw)
+	}
+	if buf, err := json.Marshal(input); err == nil && len(buf) > 0 {
+		return string(buf)
+	}
+	return "{}"
 }
 
 // sendEvent guards every send on ctx so a cancelled consumer doesn't
