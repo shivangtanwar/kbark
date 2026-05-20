@@ -30,16 +30,15 @@ type Request struct {
 	Model string
 	// System is the system prompt; empty means provider default.
 	System string
-	// Messages is the conversation so far. Roles alternate user/assistant.
+	// Messages is the conversation so far. Assistant turns may carry
+	// ToolUses (the model's previous tool calls) and user turns may
+	// carry ToolResults (responses we generated to those calls).
 	Messages []Message
 	// MaxTokens caps the response length. Zero means provider default.
 	MaxTokens int
 	// Tools, if non-empty, advertises function-call capability to the
 	// model. Tool calls land in the stream as ToolCallEvent. Used by M6.
 	Tools []Tool
-	// ToolResults supplies the responses to tool calls the model made in
-	// the previous turn. Used by M6's tool-call loop.
-	ToolResults []ToolResult
 }
 
 // Role identifies the speaker for a Message.
@@ -50,10 +49,16 @@ const (
 	RoleAssistant Role = "assistant"
 )
 
-// Message is one turn in the conversation.
+// Message is one turn in the conversation. A turn may carry plain text
+// content, a list of tool_use blocks (assistant role: the model's
+// outgoing tool calls), and/or a list of tool_result blocks (user role:
+// the responses we produced for those tool calls). Providers translate
+// this into their own native multi-part-message representation.
 type Message struct {
-	Role    Role
-	Content string
+	Role        Role
+	Content     string
+	ToolUses    []ToolCallEvent
+	ToolResults []ToolResult
 }
 
 // Tool advertises a function the model may call.
@@ -94,7 +99,9 @@ type ToolCallEvent struct {
 }
 
 // DoneEvent indicates the assistant's turn is over. StopReason is the
-// provider's own field, normalized when straightforward.
+// provider's own field, normalized when straightforward. For Anthropic
+// the value "tool_use" signals the model wants to use tools; the
+// session loop should dispatch them and call Stream again.
 type DoneEvent struct {
 	StopReason string
 }
@@ -109,3 +116,8 @@ func (TextDeltaEvent) isAIEvent() {}
 func (ToolCallEvent) isAIEvent()  {}
 func (DoneEvent) isAIEvent()      {}
 func (ErrorEvent) isAIEvent()     {}
+
+// StopReasonToolUse is the canonical value Anthropic emits when the
+// model wants to invoke tools. We surface it as-is so the session loop
+// can branch on it cleanly.
+const StopReasonToolUse = "tool_use"
