@@ -1,0 +1,62 @@
+version: '3'
+
+vars:
+  BINARY: kbark
+  PKG: ./cmd/kbark
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+  DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  LDFLAGS: >-
+    -s -w
+    -X github.com/shivangtanwar/kbark/internal/version.Version={{.VERSION}}
+    -X github.com/shivangtanwar/kbark/internal/version.Commit={{.COMMIT}}
+    -X github.com/shivangtanwar/kbark/internal/version.Date={{.DATE}}
+
+tasks:
+  build:
+    desc: Build the kbark binary into ./bin/
+    cmds:
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o bin/{{.BINARY}} {{.PKG}}
+
+  run:
+    desc: Run kbark from source
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" {{.PKG}} {{.CLI_ARGS}}
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test -race -count=1 ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run ./...
+
+  fmt:
+    desc: Format with gofumpt
+    cmds:
+      - gofumpt -w .
+
+  tidy:
+    desc: Tidy go.mod/go.sum
+    cmds:
+      - go mod tidy
+
+  vhs:
+    desc: Regenerate the README demo gif (placeholder until M9)
+    cmds:
+      - echo "vhs target wired in M9"
+
+  release-snapshot:
+    desc: Build a snapshot release locally (no publish)
+    cmds:
+      - goreleaser release --snapshot --clean
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf bin/ dist/
