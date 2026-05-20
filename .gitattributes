@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+*.go diff=golang
+*.md diff=markdown
+
+go.sum linguist-generated=true
+go.mod linguist-language=Go

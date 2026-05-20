@@ -1,0 +1,45 @@
+name: Feature proposal
+description: Propose a feature. Read the roadmap and CONTRIBUTING.md first.
+title: "feat: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        v1 is intentionally narrow. Most features land later, not never. Read `ROADMAP.md` before filing.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve
+      description: Describe the user pain in one paragraph. No solution yet.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: One paragraph. What would kbark do that solves the pain.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What did you try, what could kbark integrate with instead.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Does this fit the v1 wedge?
+      description: The wedge is "k9s + ? key for AI diagnosis." Read CONTRIBUTING.md.
+      options:
+        - "Yes — directly improves the wedge"
+        - "Adjacent — could fit post-v1"
+        - "Probably not — but worth recording"
+    validations:
+      required: true

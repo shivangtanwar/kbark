@@ -1,0 +1,84 @@
+name: Bug report
+description: Something kbark did, didn't do, or crashed on.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please give a minimal, reproducible report. Vague reports get closed.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: One paragraph. What did you do, what did kbark do, what did you expect.
+      placeholder: I pressed X, kbark did Y, I expected Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands and key presses. A kubeconfig context name is fine; do not paste the kubeconfig.
+      placeholder: |
+        1. kbark --context=minikube
+        2. Arrow to a pod in CrashLoopBackOff
+        3. Press ?
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: kbark version
+      description: Output of `kbark version`.
+      placeholder: v0.0.0-dev
+    validations:
+      required: true
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: Only if you built from source. Output of `go version`.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal emulator
+      placeholder: iTerm2 3.5, Alacritty 0.13, Windows Terminal 1.20, ...
+    validations:
+      required: true
+
+  - type: input
+    id: kube-version
+    attributes:
+      label: Kubernetes server version
+      description: Output of `kubectl version -o yaml | grep gitVersion`.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any error output. Redact API keys and identifiers before submitting.
+      render: shell
+    validations:
+      required: false
