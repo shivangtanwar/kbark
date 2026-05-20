@@ -52,7 +52,14 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	}
 	logService := kube.NewLogService(clientset, ctx)
 
-	model := tui.NewModel(kubeFlags, profileFlag, podService, podsCh, podsDone, logService)
+	model := tui.NewModel(tui.ModelDeps{
+		Flags:      kubeFlags,
+		Profile:    profileFlag,
+		PodService: podService,
+		PodsCh:     podsCh,
+		PodsDone:   podsDone,
+		LogService: logService,
+	})
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),

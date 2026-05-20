@@ -59,21 +59,26 @@ type Model struct {
 	th     theme.Theme
 }
 
-// NewModel constructs the root model. Services and channels may be nil
-// for tests that don't exercise the data path.
-func NewModel(
-	flags *genericclioptions.ConfigFlags,
-	profile string,
-	podService *kube.PodService,
-	podsCh <-chan []*corev1.Pod,
-	podsDone <-chan struct{},
-	logService *kube.LogService,
-) Model {
-	ctx, ns := resolveContextAndNamespace(flags)
+// ModelDeps bundles everything the root Model needs at construction time.
+// Using a struct keeps the call site readable as we add more services
+// (AI provider in M5, profile loader in M8, etc.). Fields may be nil for
+// tests that don't exercise the data path.
+type ModelDeps struct {
+	Flags      *genericclioptions.ConfigFlags
+	Profile    string
+	PodService *kube.PodService
+	PodsCh     <-chan []*corev1.Pod
+	PodsDone   <-chan struct{}
+	LogService *kube.LogService
+}
+
+// NewModel constructs the root model from the dependency bundle.
+func NewModel(deps ModelDeps) Model {
+	ctx, ns := resolveContextAndNamespace(deps.Flags)
 	th := theme.Default()
 	return Model{
-		flags:       flags,
-		profile:     profile,
+		flags:       deps.Flags,
+		profile:     deps.Profile,
 		mode:        "RO",
 		contextName: ctx,
 		namespace:   ns,
@@ -81,10 +86,10 @@ func NewModel(
 		podView:     views.NewPodView(th),
 		logsView:    views.NewLogsView(th),
 		cmdbar:      components.NewCmdbar(th),
-		podService:  podService,
-		logService:  logService,
-		podsCh:      podsCh,
-		podsDone:    podsDone,
+		podService:  deps.PodService,
+		logService:  deps.LogService,
+		podsCh:      deps.PodsCh,
+		podsDone:    deps.PodsDone,
 		footer:      components.NewFooter(th),
 		keys:        DefaultKeyMap(),
 		th:          th,
