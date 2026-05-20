@@ -1,0 +1,32 @@
+# build artifacts
+/bin/
+/dist/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go
+vendor/
+
+# editors / OS
+.idea/
+.vscode/
+!.vscode/extensions.json
+.DS_Store
+*.swp
+*~
+
+# environment / secrets
+.env
+.env.*
+!.env.example
+
+# local strategy / decision docs (internal only, never published)
+klutch-strategy.md
+decisions.md
+FUTURE.md
+NOTES.md
+
+# claude code working dir
+.claude/
