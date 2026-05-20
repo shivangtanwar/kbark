@@ -2,19 +2,22 @@
 
 // Package tui owns the bubbletea program: the top-level Model, the
 // Update routing, and the View composition. Resource-specific views
-// live under internal/tui/views/ (added in subsequent PRs).
+// live under internal/tui/views/.
 package tui
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	"github.com/shivangtanwar/kbark/internal/tui/components"
 	"github.com/shivangtanwar/kbark/internal/tui/theme"
+	"github.com/shivangtanwar/kbark/internal/tui/views"
 )
 
-// Model is the root bubbletea model. Subsequent PRs add resource views
-// inside the content area; for now the area is intentionally blank.
+// Model is the root bubbletea model. It embeds whichever resource view
+// is currently active (only PodView in M1) and renders the persistent
+// footer beneath it.
 type Model struct {
 	width, height int
 
@@ -25,15 +28,18 @@ type Model struct {
 	contextName string
 	namespace   string
 
+	podView   views.PodView
+	snapshots <-chan []*corev1.Pod
+
 	footer components.Footer
 	keys   KeyMap
 	th     theme.Theme
 }
 
-// NewModel constructs the root TUI model. It resolves the effective
-// kubeconfig context and namespace eagerly so the footer can show them
-// from frame one, even if no cluster traffic has happened yet.
-func NewModel(flags *genericclioptions.ConfigFlags, profile string) Model {
+// NewModel constructs the root TUI model. `snapshots` is the channel the
+// kube package's PodLister writes to; pass nil during tests that don't
+// exercise the data path.
+func NewModel(flags *genericclioptions.ConfigFlags, profile string, snapshots <-chan []*corev1.Pod) Model {
 	ctx, ns := resolveContextAndNamespace(flags)
 	th := theme.Default()
 	return Model{
@@ -42,6 +48,8 @@ func NewModel(flags *genericclioptions.ConfigFlags, profile string) Model {
 		mode:        "RO",
 		contextName: ctx,
 		namespace:   ns,
+		podView:     views.NewPodView(th),
+		snapshots:   snapshots,
 		footer:      components.NewFooter(th),
 		keys:        DefaultKeyMap(),
 		th:          th,
@@ -49,7 +57,10 @@ func NewModel(flags *genericclioptions.ConfigFlags, profile string) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	if m.snapshots == nil {
+		return nil
+	}
+	return waitForPods(m.snapshots)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -57,13 +68,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.podView = m.podView.SetSize(m.width, m.contentHeight())
 		return m, nil
 
 	case tea.KeyMsg:
 		if keyMatches(msg, m.keys.Quit) {
 			return m, tea.Quit
 		}
-		return m, nil
+		// Forward navigation keys to the pod view (table scrolling).
+		var cmd tea.Cmd
+		m.podView, cmd = m.podView.Update(msg)
+		return m, cmd
+
+	case PodsUpdatedMsg:
+		m.podView = m.podView.SetPods(msg.Pods)
+		// Keep listening for the next snapshot.
+		return m, waitForPods(m.snapshots)
 
 	case NamespaceChangedMsg:
 		m.namespace = msg.Namespace
@@ -74,14 +94,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	if m.width == 0 || m.height == 0 {
-		// First frame before WindowSizeMsg arrives — render nothing.
 		return ""
 	}
-	contentHeight := m.height - 1
-	if contentHeight < 0 {
-		contentHeight = 0
-	}
-	content := m.th.Content.Width(m.width).Height(contentHeight).Render("")
+	content := m.podView.View()
 	foot := m.footer.View(m.width, components.FooterData{
 		Context:   m.contextName,
 		Namespace: m.namespace,
@@ -90,6 +105,27 @@ func (m Model) View() string {
 		Help:      "q quit · : cmd · ? AI",
 	})
 	return content + "\n" + foot
+}
+
+func (m Model) contentHeight() int {
+	h := m.height - 1
+	if h < 0 {
+		return 0
+	}
+	return h
+}
+
+// waitForPods blocks on the snapshot channel and converts each receive
+// into a PodsUpdatedMsg. After handling, Update returns this Cmd again
+// to keep the bridge alive for the next snapshot.
+func waitForPods(ch <-chan []*corev1.Pod) tea.Cmd {
+	return func() tea.Msg {
+		pods, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return PodsUpdatedMsg{Pods: pods}
+	}
 }
 
 func resolveContextAndNamespace(flags *genericclioptions.ConfigFlags) (string, string) {
