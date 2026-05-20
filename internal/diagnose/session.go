@@ -110,105 +110,132 @@ func runLoop(
 	debugf("runLoop starting tools=%d payload_len=%d", len(tools), len(payload))
 
 	for turn := 0; turn < MaxToolTurns; turn++ {
-		turnStart := time.Now()
-		turnCtx, turnCancel := context.WithTimeout(ctx, TurnTimeout)
-		debugf("turn=%d opening stream messages=%d (timeout=%s)", turn, len(messages), TurnTimeout)
-		innerEvents, err := provider.Stream(turnCtx, ai.Request{
-			Model:     model,
-			System:    SystemPrompt,
-			Messages:  messages,
-			MaxTokens: DefaultMaxTokens,
-			Tools:     tools,
-		})
+		// The per-turn timeout is a derived context so any branch out of
+		// this loop body via return cancels the timeout cleanly. Defer
+		// stacks up to MaxToolTurns levels deep — negligible — and fires
+		// when runLoop exits.
+		shouldContinue, err := runTurn(ctx, turn, provider, model, &messages, tools, dispatcher, out)
 		if err != nil {
-			turnCancel()
-			debugf("turn=%d Stream() returned err=%v", turn, err)
 			sendSessionEvent(ctx, out, ai.ErrorEvent{Err: err})
 			return
 		}
-
-		var (
-			assistantText strings.Builder
-			pending       []ai.ToolCallEvent
-			stopReason    string
-			eventCount    int
-		)
-		for ev := range innerEvents {
-			eventCount++
-			switch e := ev.(type) {
-			case ai.TextDeltaEvent:
-				assistantText.WriteString(e.Delta)
-				if !sendSessionEvent(ctx, out, e) {
-					debugf("turn=%d sendSessionEvent(TextDelta) cancelled; exiting", turn)
-					return
-				}
-			case ai.ToolCallEvent:
-				debugf("turn=%d tool_call name=%s id=%s args=%s", turn, e.Name, e.ID, e.Arguments)
-				pending = append(pending, e)
-				if !sendSessionEvent(ctx, out, e) {
-					return
-				}
-			case ai.DoneEvent:
-				stopReason = e.StopReason
-				debugf("turn=%d done stop_reason=%q", turn, stopReason)
-			case ai.ErrorEvent:
-				debugf("turn=%d error from provider: %v", turn, e.Err)
-				sendSessionEvent(ctx, out, e)
-				return
-			}
-		}
-		turnCancel()
-		debugf("turn=%d inner stream closed events=%d pending_tools=%d text_len=%d elapsed=%v",
-			turn, eventCount, len(pending), assistantText.Len(), time.Since(turnStart))
-		if turnCtx.Err() == context.DeadlineExceeded {
-			debugf("turn=%d hit TurnTimeout; aborting with error", turn)
-			sendSessionEvent(ctx, out, ai.ErrorEvent{Err: errors.New("turn timed out after " + TurnTimeout.String())})
+		if !shouldContinue {
 			return
 		}
-
-		// No tool calls this turn — model has produced its final answer.
-		if len(pending) == 0 || dispatcher == nil {
-			debugf("turn=%d exiting via DoneEvent (no tools)", turn)
-			sendSessionEvent(ctx, out, ai.DoneEvent{StopReason: stopReason})
-			return
-		}
-
-		// Build assistant turn (text + tool_uses) and the user turn that
-		// follows with the tool results.
-		results := make([]ai.ToolResult, 0, len(pending))
-		for i, tc := range pending {
-			dispatchStart := time.Now()
-			content, derr := dispatcher.Dispatch(ctx, tc)
-			debugf("turn=%d tool[%d]=%s elapsed=%v err=%v content_len=%d",
-				turn, i, tc.Name, time.Since(dispatchStart), derr, len(content))
-			isErr := derr != nil
-			if isErr {
-				content = derr.Error()
-			}
-			results = append(results, ai.ToolResult{
-				ToolCallID: tc.ID,
-				Content:    content,
-				IsError:    isErr,
-			})
-		}
-
-		messages = append(
-			messages,
-			ai.Message{
-				Role:     ai.RoleAssistant,
-				Content:  assistantText.String(),
-				ToolUses: pending,
-			},
-			ai.Message{
-				Role:        ai.RoleUser,
-				ToolResults: results,
-			},
-		)
-		debugf("turn=%d appended assistant+user_tool_results; next turn starts with %d messages",
-			turn, len(messages))
 	}
 
 	sendSessionEvent(ctx, out, ai.ErrorEvent{Err: ErrMaxToolTurnsExceeded})
+}
+
+// runTurn executes one round of the streaming loop. Returns
+// (continueLoop, err). When err != nil the caller emits an ErrorEvent.
+// When !continueLoop, the caller exits (final answer was already
+// streamed and a DoneEvent was emitted from inside the turn).
+func runTurn(
+	parentCtx context.Context,
+	turn int,
+	provider ai.Provider,
+	model string,
+	messages *[]ai.Message,
+	tools []ai.Tool,
+	dispatcher *Dispatcher,
+	out chan<- ai.Event,
+) (bool, error) {
+	turnStart := time.Now()
+	turnCtx, turnCancel := context.WithTimeout(parentCtx, TurnTimeout)
+	defer turnCancel()
+
+	debugf("turn=%d opening stream messages=%d (timeout=%s)", turn, len(*messages), TurnTimeout)
+	innerEvents, err := provider.Stream(turnCtx, ai.Request{
+		Model:     model,
+		System:    SystemPrompt,
+		Messages:  *messages,
+		MaxTokens: DefaultMaxTokens,
+		Tools:     tools,
+	})
+	if err != nil {
+		debugf("turn=%d Stream() returned err=%v", turn, err)
+		return false, err
+	}
+
+	var (
+		assistantText strings.Builder
+		pending       []ai.ToolCallEvent
+		stopReason    string
+		eventCount    int
+	)
+	for ev := range innerEvents {
+		eventCount++
+		switch e := ev.(type) {
+		case ai.TextDeltaEvent:
+			assistantText.WriteString(e.Delta)
+			if !sendSessionEvent(parentCtx, out, e) {
+				debugf("turn=%d sendSessionEvent(TextDelta) cancelled; exiting", turn)
+				return false, nil
+			}
+		case ai.ToolCallEvent:
+			debugf("turn=%d tool_call name=%s id=%s args=%s", turn, e.Name, e.ID, e.Arguments)
+			pending = append(pending, e)
+			if !sendSessionEvent(parentCtx, out, e) {
+				return false, nil
+			}
+		case ai.DoneEvent:
+			stopReason = e.StopReason
+			debugf("turn=%d done stop_reason=%q", turn, stopReason)
+		case ai.ErrorEvent:
+			debugf("turn=%d error from provider: %v", turn, e.Err)
+			sendSessionEvent(parentCtx, out, e)
+			return false, nil
+		}
+	}
+	debugf("turn=%d inner stream closed events=%d pending_tools=%d text_len=%d elapsed=%v",
+		turn, eventCount, len(pending), assistantText.Len(), time.Since(turnStart))
+	if turnCtx.Err() == context.DeadlineExceeded {
+		debugf("turn=%d hit TurnTimeout; aborting with error", turn)
+		return false, errors.New("turn timed out after " + TurnTimeout.String())
+	}
+
+	// No tool calls this turn — model has produced its final answer.
+	if len(pending) == 0 || dispatcher == nil {
+		debugf("turn=%d exiting via DoneEvent (no tools)", turn)
+		sendSessionEvent(parentCtx, out, ai.DoneEvent{StopReason: stopReason})
+		return false, nil
+	}
+
+	// Build assistant turn (text + tool_uses) and the user turn that
+	// follows with the tool results.
+	results := make([]ai.ToolResult, 0, len(pending))
+	for i, tc := range pending {
+		dispatchStart := time.Now()
+		content, derr := dispatcher.Dispatch(parentCtx, tc)
+		debugf("turn=%d tool[%d]=%s elapsed=%v err=%v content_len=%d",
+			turn, i, tc.Name, time.Since(dispatchStart), derr, len(content))
+		isErr := derr != nil
+		if isErr {
+			content = derr.Error()
+		}
+		results = append(results, ai.ToolResult{
+			ToolCallID: tc.ID,
+			Content:    content,
+			IsError:    isErr,
+		})
+	}
+
+	*messages = append(
+		*messages,
+		ai.Message{
+			Role:     ai.RoleAssistant,
+			Content:  assistantText.String(),
+			ToolUses: pending,
+		},
+		ai.Message{
+			Role:        ai.RoleUser,
+			ToolResults: results,
+		},
+	)
+	debugf("turn=%d appended assistant+user_tool_results; next turn starts with %d messages",
+		turn, len(*messages))
+	return true, nil
 }
 
 func sendSessionEvent(ctx context.Context, out chan<- ai.Event, e ai.Event) bool {
