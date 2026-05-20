@@ -21,6 +21,12 @@ import (
 // pods on a fresh cluster arrive in milliseconds) into a single render.
 const DefaultDebounce = 100 * time.Millisecond
 
+// SyncTimeout bounds how long Start waits for the informer cache to sync.
+// Cache sync blocks indefinitely against an unreachable apiserver, which
+// freezes the program before the TUI even paints; a finite ceiling turns
+// that into an actionable error instead of a silent hang.
+const SyncTimeout = 10 * time.Second
+
 // PodLister observes the Pod informer and pushes sorted snapshots of the
 // current pod set onto a channel. Snapshots are coalesced over DefaultDebounce
 // so the TUI re-renders once per burst, not once per event.
@@ -57,15 +63,22 @@ func NewPodLister(factory informers.SharedInformerFactory) *PodLister {
 }
 
 // Start runs the factory and blocks until the pod informer's cache is
-// synced. After Start returns, the consumer should expect a snapshot on
-// Snapshots() within `window` even on an empty cluster (the initial
-// "list complete" tick still bumps the timer).
+// synced — or SyncTimeout elapses, whichever is sooner. The timeout is
+// what prevents an unreachable apiserver from freezing the TUI startup
+// indefinitely.
 func (pl *PodLister) Start(ctx context.Context) error {
 	pl.factory.Start(ctx.Done())
-	synced := pl.factory.WaitForCacheSync(ctx.Done())
+
+	syncCtx, cancel := context.WithTimeout(ctx, SyncTimeout)
+	defer cancel()
+
+	synced := pl.factory.WaitForCacheSync(syncCtx.Done())
 	for typ, ok := range synced {
 		if !ok {
-			return fmt.Errorf("informer %v did not sync before context cancelled", typ)
+			if ctx.Err() != nil {
+				return fmt.Errorf("informer %v sync interrupted: %w", typ, ctx.Err())
+			}
+			return fmt.Errorf("informer %v did not sync within %s (apiserver unreachable?)", typ, SyncTimeout)
 		}
 	}
 	// Force a first snapshot even if there were zero events during sync.
