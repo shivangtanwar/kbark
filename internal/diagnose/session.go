@@ -164,11 +164,12 @@ func runTurn(
 		stopReason    string
 		eventCount    int
 	)
-	// Read events via select instead of for-range so we can honour the
+	// Read events via select instead of for-range so we honour the
 	// per-turn timeout even when the provider goroutine is stuck inside
 	// the SDK's stream.Next() and doesn't close the events channel.
-	// If turnCtx fires, we abandon the provider goroutine — it leaks
-	// until the SDK eventually returns (server-side ~10m worst case).
+	// Sends to `out` also race against turnCtx — without that the
+	// session would block here waiting for the consumer's buffer space
+	// even after the timeout has expired.
 streamLoop:
 	for {
 		select {
@@ -180,22 +181,26 @@ streamLoop:
 			switch e := ev.(type) {
 			case ai.TextDeltaEvent:
 				assistantText.WriteString(e.Delta)
-				if !sendSessionEvent(parentCtx, out, e) {
-					debugf("turn=%d sendSessionEvent(TextDelta) cancelled; exiting", turn)
+				if !forwardEvent(turnCtx, out, e) {
+					debugf("turn=%d forwardEvent(TextDelta) cancelled after events=%d (turnCtx.Err=%v)",
+						turn, eventCount, turnCtx.Err())
+					if turnCtx.Err() == context.DeadlineExceeded {
+						return false, errors.New("turn timed out after " + TurnTimeout.String())
+					}
 					return false, nil
 				}
 			case ai.ToolCallEvent:
 				debugf("turn=%d tool_call name=%s id=%s args=%s", turn, e.Name, e.ID, e.Arguments)
 				pending = append(pending, e)
-				if !sendSessionEvent(parentCtx, out, e) {
+				if !forwardEvent(turnCtx, out, e) {
 					return false, nil
 				}
 			case ai.DoneEvent:
 				stopReason = e.StopReason
-				debugf("turn=%d done stop_reason=%q", turn, stopReason)
+				debugf("turn=%d done stop_reason=%q after events=%d", turn, stopReason, eventCount)
 			case ai.ErrorEvent:
 				debugf("turn=%d error from provider: %v", turn, e.Err)
-				sendSessionEvent(parentCtx, out, e)
+				forwardEvent(turnCtx, out, e)
 				return false, nil
 			}
 		case <-turnCtx.Done():
@@ -259,6 +264,20 @@ func sendSessionEvent(ctx context.Context, out chan<- ai.Event, e ai.Event) bool
 	case out <- e:
 		return true
 	case <-ctx.Done():
+		return false
+	}
+}
+
+// forwardEvent is like sendSessionEvent but bails on a turn-scoped ctx
+// instead of the long-lived session ctx. Used inside the per-turn loop
+// so that a per-turn deadline cuts off in-flight sends to a slow
+// consumer; the long-lived parentCtx is only respected at end-of-loop
+// (DoneEvent / final ErrorEvent forwarding from runLoop).
+func forwardEvent(turnCtx context.Context, out chan<- ai.Event, e ai.Event) bool {
+	select {
+	case out <- e:
+		return true
+	case <-turnCtx.Done():
 		return false
 	}
 }
