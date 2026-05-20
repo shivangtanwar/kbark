@@ -9,9 +9,11 @@ pre-commit:
       glob: "*.go"
       run: goimports -w -local github.com/shivangtanwar/kbark {staged_files}
       stage_fixed: true
-    golangci-lint:
-      glob: "*.go"
-      run: golangci-lint run --new-from-rev=HEAD~1 ./...
+    # golangci-lint is paused until the v1.x → v2.x migration that supports
+    # Go 1.26 export data. Re-enable when golangci-lint v2 lands in the project.
+    # golangci-lint:
+    #   glob: "*.go"
+    #   run: golangci-lint run --new-from-rev=HEAD~1 ./...
 
 pre-push:
   commands:
