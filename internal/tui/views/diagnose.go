@@ -23,11 +23,18 @@ const (
 )
 
 // DiagnoseView renders a streaming AI diagnosis. Text accumulates into a
-// single string; the viewport scrolls; we auto-scroll to bottom while
-// streaming, and freeze on the user's chosen scroll position once Done.
+// single string field; the viewport scrolls; we auto-scroll to bottom
+// while streaming, and freeze on the user's chosen scroll position once
+// Done.
+//
+// The text buffer is a plain string (not a strings.Builder) because the
+// view is passed by value through the bubbletea Update loop — a Builder
+// would panic ("illegal use of non-zero Builder copied by value") the
+// moment Go's escape analysis chose a different memory location for the
+// copy.
 type DiagnoseView struct {
 	vp    viewport.Model
-	text  strings.Builder
+	text  string
 	title string
 	state DiagnoseState
 	err   error
@@ -68,7 +75,7 @@ func (v DiagnoseView) SetSize(width, height int) DiagnoseView {
 // Reset clears the buffer and returns the view to the streaming state.
 // Called when the user re-issues `?` on a different (or the same) pod.
 func (v DiagnoseView) Reset() DiagnoseView {
-	v.text.Reset()
+	v.text = ""
 	v.vp.SetContent("")
 	v.state = DiagnoseStreaming
 	v.err = nil
@@ -78,8 +85,8 @@ func (v DiagnoseView) Reset() DiagnoseView {
 // AppendText accumulates a delta and scrolls to bottom (auto-follow
 // behaviour while streaming).
 func (v DiagnoseView) AppendText(delta string) DiagnoseView {
-	v.text.WriteString(delta)
-	v.vp.SetContent(v.text.String())
+	v.text += delta
+	v.vp.SetContent(v.text)
 	if v.state == DiagnoseStreaming {
 		v.vp.GotoBottom()
 	}
