@@ -17,29 +17,36 @@ import (
 const DefaultMaxTokens = 1500
 
 // MaxToolTurns caps the multi-turn tool loop. Plenty for a real
-// diagnosis (Anthropic typically converges in 1-3 turns); the bound
+// diagnosis (Anthropic typically converges in 1-2 turns); the bound
 // exists to prevent a misbehaving model burning through quota with
-// infinite tool calls.
-const MaxToolTurns = 10
+// infinite tool calls. Empirically 5 has plenty of headroom.
+const MaxToolTurns = 5
+
+// TurnTimeout caps how long a single provider.Stream call may run.
+// Without this bound, a stalled SSE connection (Anthropic occasionally
+// hangs late in a long conversation) would freeze the diagnose modal
+// indefinitely. 60s is well past any reasonable token-generation
+// latency for our prompts.
+const TurnTimeout = 60 * time.Second
 
 // SystemPrompt is the v1 instruction set we hand the model. Iterated in M9.
 const SystemPrompt = `You are an expert Kubernetes operator. The user has selected a pod and pressed "?" for a diagnosis.
 
-Below is the pod's current state: phase, container statuses, recent events, and the tail of its logs.
+Below is the pod's current state: phase, container statuses, recent events, and the tail of its logs. This initial payload is authoritative for the pod itself — do NOT call describe_pod or get_resource on the pod under diagnosis; you already have what you need about it.
 
-When you have access to tools, use them to gather additional context as needed:
-- get_events / get_previous_logs / get_logs are useful for CrashLoopBackOff and image-pull failures
-- describe_pod helps when you need the pod's spec (mounts, probes)
-- get_resource lets you inspect a ConfigMap or Secret the pod references
+Use tools only when the initial payload genuinely lacks something:
+- get_previous_logs — to read what a CrashLoopBackOff container printed before its last restart.
+- get_events — only if the events shown above seem incomplete.
+- get_resource — to inspect a *different* resource the pod references (a ConfigMap, Secret, Service, PVC, etc.), not the pod itself.
 
-Your final job:
-- Identify what is wrong, in 2 to 3 short paragraphs.
+Prefer at most one or two tool calls. Once you have the evidence you need, write the final answer.
+
+Final answer rules:
+- Two or three short paragraphs of plain prose. No markdown bullets, no headers.
 - Be specific about the likely root cause when the data supports it (e.g. "the readiness probe targets port 8081 but the container listens on 8080").
 - Cite the evidence ("the events show ImagePullBackOff", "the logs end with panic: ...") rather than asserting facts you can't see.
 - If the pod looks healthy, say so plainly and stop.
-- Never invent details that aren't in the data. If logs are absent, say "no logs available" instead of speculating.
-
-Write the final answer in plain text. No markdown bullets, no headers. Two or three paragraphs of prose.`
+- Never invent details that aren't in the data. If logs are absent, say "no logs available" instead of speculating.`
 
 // ErrMaxToolTurnsExceeded fires when the model keeps calling tools past
 // the MaxToolTurns cap. Surfaced as an ErrorEvent to the consumer.
@@ -104,8 +111,9 @@ func runLoop(
 
 	for turn := 0; turn < MaxToolTurns; turn++ {
 		turnStart := time.Now()
-		debugf("turn=%d opening stream messages=%d", turn, len(messages))
-		innerEvents, err := provider.Stream(ctx, ai.Request{
+		turnCtx, turnCancel := context.WithTimeout(ctx, TurnTimeout)
+		debugf("turn=%d opening stream messages=%d (timeout=%s)", turn, len(messages), TurnTimeout)
+		innerEvents, err := provider.Stream(turnCtx, ai.Request{
 			Model:     model,
 			System:    SystemPrompt,
 			Messages:  messages,
@@ -113,6 +121,7 @@ func runLoop(
 			Tools:     tools,
 		})
 		if err != nil {
+			turnCancel()
 			debugf("turn=%d Stream() returned err=%v", turn, err)
 			sendSessionEvent(ctx, out, ai.ErrorEvent{Err: err})
 			return
@@ -148,8 +157,14 @@ func runLoop(
 				return
 			}
 		}
+		turnCancel()
 		debugf("turn=%d inner stream closed events=%d pending_tools=%d text_len=%d elapsed=%v",
 			turn, eventCount, len(pending), assistantText.Len(), time.Since(turnStart))
+		if turnCtx.Err() == context.DeadlineExceeded {
+			debugf("turn=%d hit TurnTimeout; aborting with error", turn)
+			sendSessionEvent(ctx, out, ai.ErrorEvent{Err: errors.New("turn timed out after " + TurnTimeout.String())})
+			return
+		}
 
 		// No tool calls this turn — model has produced its final answer.
 		if len(pending) == 0 || dispatcher == nil {
