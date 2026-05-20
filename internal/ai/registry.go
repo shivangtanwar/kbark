@@ -12,7 +12,9 @@ func New(name string) (Provider, error) {
 		return NewAnthropic()
 	case "openai":
 		return NewOpenAI()
+	case "ollama":
+		return NewOllama()
 	default:
-		return nil, fmt.Errorf("unknown provider %q (supported: anthropic, openai)", name)
+		return nil, fmt.Errorf("unknown provider %q (supported: anthropic, openai, ollama)", name)
 	}
 }

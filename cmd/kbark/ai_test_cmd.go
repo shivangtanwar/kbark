@@ -34,7 +34,7 @@ var aiTestCmd = &cobra.Command{
 
 func init() {
 	aiTestCmd.Flags().StringVar(&aiTestProvider, "provider", "anthropic",
-		"Provider name (anthropic|openai; ollama lands in M4.3)")
+		"Provider name (anthropic|openai|ollama)")
 	aiTestCmd.Flags().StringVar(&aiTestModel, "model", "claude-sonnet-4-6",
 		"Model identifier for the chosen provider")
 	rootCmd.AddCommand(aiTestCmd)
