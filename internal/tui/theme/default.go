@@ -18,10 +18,23 @@ type Theme struct {
 	Content lipgloss.Style
 	// Accent — single brand accent used for selection and emphasis.
 	Accent lipgloss.Style
-	// Status colors for resource rows (populated in PR #7).
+
+	// Abstract doctor-style status colors (used by `kbark doctor`).
 	StatusOK   lipgloss.Style
 	StatusWarn lipgloss.Style
 	StatusFail lipgloss.Style
+
+	// Concrete pod-phase colors (used by the pod table view).
+	PhaseRunning   lipgloss.Style
+	PhasePending   lipgloss.Style
+	PhaseFailed    lipgloss.Style
+	PhaseSucceeded lipgloss.Style
+	PhaseUnknown   lipgloss.Style
+
+	// Table styles.
+	TableHeader   lipgloss.Style
+	TableSelected lipgloss.Style
+	TableCell     lipgloss.Style
 }
 
 func Default() Theme {
@@ -40,8 +53,46 @@ func Default() Theme {
 		Content: lipgloss.NewStyle(),
 		Accent: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("39")),
+
 		StatusOK:   lipgloss.NewStyle().Foreground(lipgloss.Color("46")),
 		StatusWarn: lipgloss.NewStyle().Foreground(lipgloss.Color("220")),
 		StatusFail: lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
+
+		// Dim green to keep "Running" calm — the common case shouldn't shout.
+		PhaseRunning:   lipgloss.NewStyle().Foreground(lipgloss.Color("34")),
+		PhasePending:   lipgloss.NewStyle().Foreground(lipgloss.Color("220")),
+		PhaseFailed:    lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
+		PhaseSucceeded: lipgloss.NewStyle().Foreground(lipgloss.Color("24")),
+		PhaseUnknown:   lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
+
+		TableHeader: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("252")).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderBottom(true).
+			BorderForeground(lipgloss.Color("237")),
+		TableSelected: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("232")).
+			Background(lipgloss.Color("117")).
+			Bold(true),
+		TableCell: lipgloss.NewStyle().
+			Padding(0, 1),
+	}
+}
+
+// Phase returns the lipgloss style appropriate for a Kubernetes pod phase.
+// Anything not in {Running, Pending, Failed, Succeeded} renders as Unknown.
+func (t Theme) Phase(phase string) lipgloss.Style {
+	switch phase {
+	case "Running":
+		return t.PhaseRunning
+	case "Pending":
+		return t.PhasePending
+	case "Failed":
+		return t.PhaseFailed
+	case "Succeeded":
+		return t.PhaseSucceeded
+	default:
+		return t.PhaseUnknown
 	}
 }
