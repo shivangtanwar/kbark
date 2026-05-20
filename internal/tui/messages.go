@@ -17,6 +17,16 @@ type NamespaceChangedMsg struct {
 	Namespace string
 }
 
+// LogsBatchMsg carries a debounced batch of log lines from the active
+// log streamer. The view appends; it never replaces.
+type LogsBatchMsg struct {
+	Lines []string
+}
+
+// LogsEndMsg fires when the active log stream ends (EOF, error, or the
+// stream's context cancelled). The view stops issuing waitForLogs Cmds.
+type LogsEndMsg struct{}
+
 // ErrMsg surfaces a non-fatal error (e.g. transient watch retry) to be
 // rendered in the footer status area without crashing the program.
 type ErrMsg struct {
