@@ -12,11 +12,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
+	"github.com/shivangtanwar/kbark/internal/ai"
+	"github.com/shivangtanwar/kbark/internal/diagnose"
 	"github.com/shivangtanwar/kbark/internal/kube"
 	"github.com/shivangtanwar/kbark/internal/tui"
 )
 
 var profileFlag string
+
+const defaultAIModel = "claude-sonnet-4-6"
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(
@@ -51,15 +55,29 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("start pod informer: %w", err)
 	}
 	logService := kube.NewLogService(clientset, ctx)
+	podContextBuilder := diagnose.NewPodContextBuilder(clientset)
+
+	// AI is optional. If the env isn't set we let the TUI start and
+	// surface the configuration error inside the diagnose modal when the
+	// user actually presses `?`.
+	var aiProvider ai.Provider
+	if p, err := ai.New("anthropic"); err == nil {
+		aiProvider = p
+	}
 
 	model := tui.NewModel(tui.ModelDeps{
-		Flags:      kubeFlags,
-		Profile:    profileFlag,
-		PodService: podService,
-		PodsCh:     podsCh,
-		PodsDone:   podsDone,
-		LogService: logService,
+		Ctx:               ctx,
+		Flags:             kubeFlags,
+		Profile:           profileFlag,
+		PodService:        podService,
+		PodsCh:            podsCh,
+		PodsDone:          podsDone,
+		LogService:        logService,
+		PodContextBuilder: podContextBuilder,
+		AIProvider:        aiProvider,
+		AIModel:           defaultAIModel,
 	})
+
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),

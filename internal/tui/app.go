@@ -6,6 +6,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -13,6 +15,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
+	"github.com/shivangtanwar/kbark/internal/ai"
+	"github.com/shivangtanwar/kbark/internal/diagnose"
 	"github.com/shivangtanwar/kbark/internal/kube"
 	"github.com/shivangtanwar/kbark/internal/tui/components"
 	"github.com/shivangtanwar/kbark/internal/tui/theme"
@@ -27,13 +31,29 @@ type ActiveView int
 const (
 	ViewPods ActiveView = iota
 	ViewLogs
+	ViewDiagnose
 )
 
-// Model is the root bubbletea model. It owns every resource view, the
-// command bar, the persistent footer, and the kube services that manage
-// informer / log-streamer lifecycles.
+// ModelDeps bundles everything the root Model needs at construction time.
+// Fields may be nil for tests that don't exercise the data path.
+type ModelDeps struct {
+	Ctx               context.Context
+	Flags             *genericclioptions.ConfigFlags
+	Profile           string
+	PodService        *kube.PodService
+	PodsCh            <-chan []*corev1.Pod
+	PodsDone          <-chan struct{}
+	LogService        *kube.LogService
+	PodContextBuilder *diagnose.PodContextBuilder
+	AIProvider        ai.Provider
+	AIModel           string
+}
+
+// Model is the root bubbletea model.
 type Model struct {
 	width, height int
+
+	ctx context.Context
 
 	flags   *genericclioptions.ConfigFlags
 	profile string
@@ -42,57 +62,59 @@ type Model struct {
 	contextName string
 	namespace   string
 
-	active     ActiveView
-	podView    views.PodView
-	logsView   views.LogsView
-	cmdbar     components.Cmdbar
-	podService *kube.PodService
-	logService *kube.LogService
+	active       ActiveView
+	podView      views.PodView
+	logsView     views.LogsView
+	diagnoseView views.DiagnoseView
+	cmdbar       components.Cmdbar
 
-	podsCh   <-chan []*corev1.Pod
-	podsDone <-chan struct{}
-	logsCh   <-chan []string
-	logsDone <-chan struct{}
+	podService     *kube.PodService
+	logService     *kube.LogService
+	podContextBldr *diagnose.PodContextBuilder
+	aiProvider     ai.Provider
+	aiModel        string
+
+	podsCh           <-chan []*corev1.Pod
+	podsDone         <-chan struct{}
+	logsCh           <-chan []string
+	logsDone         <-chan struct{}
+	diagnoseSession  *diagnose.Session
+	diagnoseEventsCh <-chan ai.Event
 
 	footer components.Footer
 	keys   KeyMap
 	th     theme.Theme
 }
 
-// ModelDeps bundles everything the root Model needs at construction time.
-// Using a struct keeps the call site readable as we add more services
-// (AI provider in M5, profile loader in M8, etc.). Fields may be nil for
-// tests that don't exercise the data path.
-type ModelDeps struct {
-	Flags      *genericclioptions.ConfigFlags
-	Profile    string
-	PodService *kube.PodService
-	PodsCh     <-chan []*corev1.Pod
-	PodsDone   <-chan struct{}
-	LogService *kube.LogService
-}
-
-// NewModel constructs the root model from the dependency bundle.
 func NewModel(deps ModelDeps) Model {
-	ctx, ns := resolveContextAndNamespace(deps.Flags)
+	ctxName, ns := resolveContextAndNamespace(deps.Flags)
 	th := theme.Default()
+	parentCtx := deps.Ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
 	return Model{
-		flags:       deps.Flags,
-		profile:     deps.Profile,
-		mode:        "RO",
-		contextName: ctx,
-		namespace:   ns,
-		active:      ViewPods,
-		podView:     views.NewPodView(th),
-		logsView:    views.NewLogsView(th),
-		cmdbar:      components.NewCmdbar(th),
-		podService:  deps.PodService,
-		logService:  deps.LogService,
-		podsCh:      deps.PodsCh,
-		podsDone:    deps.PodsDone,
-		footer:      components.NewFooter(th),
-		keys:        DefaultKeyMap(),
-		th:          th,
+		ctx:            parentCtx,
+		flags:          deps.Flags,
+		profile:        deps.Profile,
+		mode:           "RO",
+		contextName:    ctxName,
+		namespace:      ns,
+		active:         ViewPods,
+		podView:        views.NewPodView(th),
+		logsView:       views.NewLogsView(th),
+		diagnoseView:   views.NewDiagnoseView(th),
+		cmdbar:         components.NewCmdbar(th),
+		podService:     deps.PodService,
+		logService:     deps.LogService,
+		podContextBldr: deps.PodContextBuilder,
+		aiProvider:     deps.AIProvider,
+		aiModel:        deps.AIModel,
+		podsCh:         deps.PodsCh,
+		podsDone:       deps.PodsDone,
+		footer:         components.NewFooter(th),
+		keys:           DefaultKeyMap(),
+		th:             th,
 	}
 }
 
@@ -110,14 +132,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.podView = m.podView.SetSize(m.width, m.contentHeight())
 		m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
+		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
 		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 
 	case PodsUpdatedMsg:
-		// Pod state updates regardless of active view — when the user
-		// switches back from logs, the table is fresh.
 		m.podView = m.podView.SetPods(msg.Pods)
 		return m, waitForPods(m.podsCh, m.podsDone)
 
@@ -129,10 +150,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForLogs(m.logsCh, m.logsDone)
 
 	case LogsEndMsg:
-		// Stream ended naturally; stop re-arming waitForLogs but stay in
-		// the view so the user can read what was buffered.
 		m.logsCh = nil
 		m.logsDone = nil
+		return m, nil
+
+	case DiagnosisStartedMsg:
+		m.diagnoseSession = msg.Session
+		m.diagnoseEventsCh = msg.Session.Events()
+		return m, waitForDiagnoseEvent(m.diagnoseEventsCh)
+
+	case DiagnosisDeltaMsg:
+		m.diagnoseView = m.diagnoseView.AppendText(msg.Text)
+		return m, waitForDiagnoseEvent(m.diagnoseEventsCh)
+
+	case DiagnosisDoneMsg:
+		m.diagnoseView = m.diagnoseView.MarkDone()
+		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+		m.diagnoseEventsCh = nil
+		return m, nil
+
+	case DiagnosisErrorMsg:
+		m.diagnoseView = m.diagnoseView.MarkError(msg.Err)
+		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+		m.diagnoseEventsCh = nil
 		return m, nil
 	}
 	return m, nil
@@ -145,8 +185,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.submitCmd()
 		case "esc":
 			m.cmdbar = m.cmdbar.Deactivate()
-			m.podView = m.podView.SetSize(m.width, m.contentHeight())
-			m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
+			m.resizeAll()
 			return m, nil
 		default:
 			var cmd tea.Cmd
@@ -155,22 +194,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Global keys regardless of active view.
 	if keyMatches(msg, m.keys.Quit) {
 		return m, tea.Quit
 	}
 	if keyMatches(msg, m.keys.Command) {
 		m.cmdbar = m.cmdbar.Activate()
-		m.podView = m.podView.SetSize(m.width, m.contentHeight())
-		m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
+		m.resizeAll()
 		return m, nil
 	}
 
-	// View-specific.
 	switch m.active {
 	case ViewPods:
-		if msg.String() == "l" {
+		switch msg.String() {
+		case "l":
 			return m.openLogs()
+		case "?":
+			return m.openDiagnose()
 		}
 		var cmd tea.Cmd
 		m.podView, cmd = m.podView.Update(msg)
@@ -186,6 +225,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.logsView, cmd = m.logsView.Update(msg)
+		return m, cmd
+
+	case ViewDiagnose:
+		if msg.String() == "esc" {
+			return m.closeDiagnose()
+		}
+		var cmd tea.Cmd
+		m.diagnoseView, cmd = m.diagnoseView.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -223,13 +270,48 @@ func (m Model) closeLogs() (Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) openDiagnose() (Model, tea.Cmd) {
+	pod := m.podView.SelectedPod()
+	if pod == nil {
+		return m, nil
+	}
+	m.active = ViewDiagnose
+	m.diagnoseView = m.diagnoseView.Reset()
+	m.diagnoseView = m.diagnoseView.SetTitle(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+
+	if m.aiProvider == nil || m.podContextBldr == nil {
+		err := errors.New("AI not configured (set ANTHROPIC_API_KEY and restart)")
+		m.diagnoseView = m.diagnoseView.MarkError(err)
+		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+		return m, nil
+	}
+
+	return m, startDiagnosis(m.ctx, m.podContextBldr, m.aiProvider, m.aiModel, pod)
+}
+
+func (m Model) closeDiagnose() (Model, tea.Cmd) {
+	if m.diagnoseSession != nil {
+		m.diagnoseSession.Cancel()
+		m.diagnoseSession = nil
+	}
+	m.diagnoseEventsCh = nil
+	m.active = ViewPods
+	return m, nil
+}
+
+func (m *Model) resizeAll() {
+	m.podView = m.podView.SetSize(m.width, m.contentHeight())
+	m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
+	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+}
+
 func (m Model) submitCmd() (Model, tea.Cmd) {
 	input := strings.TrimSpace(m.cmdbar.Value())
 	parts := strings.Fields(input)
 	if len(parts) == 2 && parts[0] == "ns" {
 		m.cmdbar = m.cmdbar.Deactivate()
-		m.podView = m.podView.SetSize(m.width, m.contentHeight())
-		m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
+		m.resizeAll()
 		ns := parts[1]
 		return m, func() tea.Msg { return NamespaceChangedMsg{Namespace: ns} }
 	}
@@ -251,15 +333,20 @@ func (m Model) handleNamespaceChange(namespace string) (Model, tea.Cmd) {
 	m.podsCh = ch
 	m.podsDone = done
 	m.podView = m.podView.SetPods(nil)
-	// Namespace switch always returns to the pod view; an open logs stream
-	// for a now-foreign pod becomes meaningless.
-	if m.active == ViewLogs {
+	// Namespace switch always returns to the pod view; any in-flight
+	// diagnose or logs stream for a now-foreign pod becomes meaningless.
+	if m.active != ViewPods {
 		if m.logService != nil {
 			m.logService.Stop()
+		}
+		if m.diagnoseSession != nil {
+			m.diagnoseSession.Cancel()
+			m.diagnoseSession = nil
 		}
 		m.active = ViewPods
 		m.logsCh = nil
 		m.logsDone = nil
+		m.diagnoseEventsCh = nil
 	}
 	return m, waitForPods(ch, done)
 }
@@ -272,6 +359,8 @@ func (m Model) View() string {
 	switch m.active {
 	case ViewLogs:
 		content = m.logsView.View()
+	case ViewDiagnose:
+		content = m.diagnoseView.View()
 	default:
 		content = m.podView.View()
 	}
@@ -297,8 +386,10 @@ func (m Model) helpForView() string {
 			followKey = "f follow"
 		}
 		return "esc back · " + followKey + " · q quit · ? AI"
+	case ViewDiagnose:
+		return "esc dismiss · q quit"
 	default:
-		return "l logs · q quit · : cmd · ? AI"
+		return "l logs · ? AI · q quit · : cmd"
 	}
 }
 
@@ -313,8 +404,51 @@ func (m Model) contentHeight() int {
 	return h
 }
 
-// waitForPods blocks on the snapshot channel until either a snapshot
-// arrives (PodsUpdatedMsg) or the done channel closes (no-op return).
+// startDiagnosis builds the pod context payload (cheap API calls under a
+// 3s log-read budget) and opens a streaming session. Returned as a Cmd so
+// the UI isn't blocked while context assembly is in flight.
+func startDiagnosis(
+	ctx context.Context,
+	builder *diagnose.PodContextBuilder,
+	provider ai.Provider,
+	model string,
+	pod *corev1.Pod,
+) tea.Cmd {
+	return func() tea.Msg {
+		payload := builder.Build(ctx, pod)
+		session := diagnose.Start(ctx, provider, model, payload)
+		return DiagnosisStartedMsg{Session: session, Pod: pod}
+	}
+}
+
+// waitForDiagnoseEvent blocks on the session's events channel and
+// translates the next ai.Event into the corresponding bubbletea message.
+// Returns nil when the channel closes without a Done/Error event so the
+// Cmd loop quietly exits.
+func waitForDiagnoseEvent(ch <-chan ai.Event) tea.Cmd {
+	return func() tea.Msg {
+		if ch == nil {
+			return nil
+		}
+		ev, ok := <-ch
+		if !ok {
+			return DiagnosisDoneMsg{StopReason: "closed"}
+		}
+		switch e := ev.(type) {
+		case ai.TextDeltaEvent:
+			return DiagnosisDeltaMsg{Text: e.Delta}
+		case ai.DoneEvent:
+			return DiagnosisDoneMsg{StopReason: e.StopReason}
+		case ai.ErrorEvent:
+			return DiagnosisErrorMsg{Err: e.Err}
+		case ai.ToolCallEvent:
+			// M6 handles these. For now, ignore so the stream keeps flowing.
+			return nil
+		}
+		return nil
+	}
+}
+
 func waitForPods(ch <-chan []*corev1.Pod, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -329,8 +463,6 @@ func waitForPods(ch <-chan []*corev1.Pod, done <-chan struct{}) tea.Cmd {
 	}
 }
 
-// waitForLogs is the same pattern for the log streamer. Returns LogsEndMsg
-// when the streamer's done channel closes so the Model can stop re-arming.
 func waitForLogs(ch <-chan []string, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		if ch == nil {
