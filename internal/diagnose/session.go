@@ -164,36 +164,52 @@ func runTurn(
 		stopReason    string
 		eventCount    int
 	)
-	for ev := range innerEvents {
-		eventCount++
-		switch e := ev.(type) {
-		case ai.TextDeltaEvent:
-			assistantText.WriteString(e.Delta)
-			if !sendSessionEvent(parentCtx, out, e) {
-				debugf("turn=%d sendSessionEvent(TextDelta) cancelled; exiting", turn)
+	// Read events via select instead of for-range so we can honour the
+	// per-turn timeout even when the provider goroutine is stuck inside
+	// the SDK's stream.Next() and doesn't close the events channel.
+	// If turnCtx fires, we abandon the provider goroutine — it leaks
+	// until the SDK eventually returns (server-side ~10m worst case).
+streamLoop:
+	for {
+		select {
+		case ev, ok := <-innerEvents:
+			if !ok {
+				break streamLoop
+			}
+			eventCount++
+			switch e := ev.(type) {
+			case ai.TextDeltaEvent:
+				assistantText.WriteString(e.Delta)
+				if !sendSessionEvent(parentCtx, out, e) {
+					debugf("turn=%d sendSessionEvent(TextDelta) cancelled; exiting", turn)
+					return false, nil
+				}
+			case ai.ToolCallEvent:
+				debugf("turn=%d tool_call name=%s id=%s args=%s", turn, e.Name, e.ID, e.Arguments)
+				pending = append(pending, e)
+				if !sendSessionEvent(parentCtx, out, e) {
+					return false, nil
+				}
+			case ai.DoneEvent:
+				stopReason = e.StopReason
+				debugf("turn=%d done stop_reason=%q", turn, stopReason)
+			case ai.ErrorEvent:
+				debugf("turn=%d error from provider: %v", turn, e.Err)
+				sendSessionEvent(parentCtx, out, e)
 				return false, nil
 			}
-		case ai.ToolCallEvent:
-			debugf("turn=%d tool_call name=%s id=%s args=%s", turn, e.Name, e.ID, e.Arguments)
-			pending = append(pending, e)
-			if !sendSessionEvent(parentCtx, out, e) {
-				return false, nil
+		case <-turnCtx.Done():
+			debugf("turn=%d turnCtx fired (%v) after events=%d; abandoning provider goroutine",
+				turn, turnCtx.Err(), eventCount)
+			if turnCtx.Err() == context.DeadlineExceeded {
+				return false, errors.New("turn timed out after " + TurnTimeout.String())
 			}
-		case ai.DoneEvent:
-			stopReason = e.StopReason
-			debugf("turn=%d done stop_reason=%q", turn, stopReason)
-		case ai.ErrorEvent:
-			debugf("turn=%d error from provider: %v", turn, e.Err)
-			sendSessionEvent(parentCtx, out, e)
+			// Parent cancellation — propagate as a clean exit, not an error.
 			return false, nil
 		}
 	}
 	debugf("turn=%d inner stream closed events=%d pending_tools=%d text_len=%d elapsed=%v",
 		turn, eventCount, len(pending), assistantText.Len(), time.Since(turnStart))
-	if turnCtx.Err() == context.DeadlineExceeded {
-		debugf("turn=%d hit TurnTimeout; aborting with error", turn)
-		return false, errors.New("turn timed out after " + TurnTimeout.String())
-	}
 
 	// No tool calls this turn — model has produced its final answer.
 	if len(pending) == 0 || dispatcher == nil {
