@@ -22,11 +22,12 @@ vendor/
 .env.*
 !.env.example
 
-# local strategy / decision docs (internal only, never published)
+# local strategy / decision / submission drafts (internal only, never published)
 klutch-strategy.md
 decisions.md
 FUTURE.md
 NOTES.md
+kubecon-cfp-draft.md
 
 # claude code working dir
 .claude/
