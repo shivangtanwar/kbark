@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/shivangtanwar/kbark/internal/ai"
 )
@@ -99,8 +100,11 @@ func runLoop(
 	}
 
 	messages := []ai.Message{{Role: ai.RoleUser, Content: payload}}
+	debugf("runLoop starting tools=%d payload_len=%d", len(tools), len(payload))
 
 	for turn := 0; turn < MaxToolTurns; turn++ {
+		turnStart := time.Now()
+		debugf("turn=%d opening stream messages=%d", turn, len(messages))
 		innerEvents, err := provider.Stream(ctx, ai.Request{
 			Model:     model,
 			System:    SystemPrompt,
@@ -109,6 +113,7 @@ func runLoop(
 			Tools:     tools,
 		})
 		if err != nil {
+			debugf("turn=%d Stream() returned err=%v", turn, err)
 			sendSessionEvent(ctx, out, ai.ErrorEvent{Err: err})
 			return
 		}
@@ -117,29 +122,38 @@ func runLoop(
 			assistantText strings.Builder
 			pending       []ai.ToolCallEvent
 			stopReason    string
+			eventCount    int
 		)
 		for ev := range innerEvents {
+			eventCount++
 			switch e := ev.(type) {
 			case ai.TextDeltaEvent:
 				assistantText.WriteString(e.Delta)
 				if !sendSessionEvent(ctx, out, e) {
+					debugf("turn=%d sendSessionEvent(TextDelta) cancelled; exiting", turn)
 					return
 				}
 			case ai.ToolCallEvent:
+				debugf("turn=%d tool_call name=%s id=%s args=%s", turn, e.Name, e.ID, e.Arguments)
 				pending = append(pending, e)
 				if !sendSessionEvent(ctx, out, e) {
 					return
 				}
 			case ai.DoneEvent:
 				stopReason = e.StopReason
+				debugf("turn=%d done stop_reason=%q", turn, stopReason)
 			case ai.ErrorEvent:
+				debugf("turn=%d error from provider: %v", turn, e.Err)
 				sendSessionEvent(ctx, out, e)
 				return
 			}
 		}
+		debugf("turn=%d inner stream closed events=%d pending_tools=%d text_len=%d elapsed=%v",
+			turn, eventCount, len(pending), assistantText.Len(), time.Since(turnStart))
 
 		// No tool calls this turn — model has produced its final answer.
 		if len(pending) == 0 || dispatcher == nil {
+			debugf("turn=%d exiting via DoneEvent (no tools)", turn)
 			sendSessionEvent(ctx, out, ai.DoneEvent{StopReason: stopReason})
 			return
 		}
@@ -147,8 +161,11 @@ func runLoop(
 		// Build assistant turn (text + tool_uses) and the user turn that
 		// follows with the tool results.
 		results := make([]ai.ToolResult, 0, len(pending))
-		for _, tc := range pending {
+		for i, tc := range pending {
+			dispatchStart := time.Now()
 			content, derr := dispatcher.Dispatch(ctx, tc)
+			debugf("turn=%d tool[%d]=%s elapsed=%v err=%v content_len=%d",
+				turn, i, tc.Name, time.Since(dispatchStart), derr, len(content))
 			isErr := derr != nil
 			if isErr {
 				content = derr.Error()
@@ -172,6 +189,8 @@ func runLoop(
 				ToolResults: results,
 			},
 		)
+		debugf("turn=%d appended assistant+user_tool_results; next turn starts with %d messages",
+			turn, len(messages))
 	}
 
 	sendSessionEvent(ctx, out, ai.ErrorEvent{Err: ErrMaxToolTurnsExceeded})
