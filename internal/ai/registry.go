@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package ai
+
+import "fmt"
+
+// New returns a Provider by canonical name. Providers are constructed
+// lazily so missing env vars only error on demand, not at startup.
+func New(name string) (Provider, error) {
+	switch name {
+	case "anthropic":
+		return NewAnthropic()
+	default:
+		return nil, fmt.Errorf("unknown provider %q (supported: anthropic)", name)
+	}
+}
