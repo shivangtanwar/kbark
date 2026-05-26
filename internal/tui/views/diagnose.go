@@ -93,6 +93,38 @@ func (v DiagnoseView) AppendText(delta string) DiagnoseView {
 	return v
 }
 
+// AppendToolCall renders a dim breadcrumb line when the model invokes a
+// tool, so the user sees progress during the dispatch + next-turn latency
+// instead of a frozen pane. Friendly verbs keep it readable.
+func (v DiagnoseView) AppendToolCall(name string) DiagnoseView {
+	line := "\n  ⚙ " + toolCallLabel(name) + "\n"
+	v.text += line
+	v.vp.SetContent(v.text)
+	if v.state == DiagnoseStreaming {
+		v.vp.GotoBottom()
+	}
+	return v
+}
+
+// toolCallLabel maps a tool name to a short human phrase. Unknown tools
+// fall back to the raw name so new tools still render something sensible.
+func toolCallLabel(name string) string {
+	switch name {
+	case "get_logs":
+		return "reading logs…"
+	case "get_previous_logs":
+		return "reading previous container logs…"
+	case "get_events":
+		return "checking events…"
+	case "describe_pod":
+		return "describing pod…"
+	case "get_resource":
+		return "inspecting referenced resource…"
+	default:
+		return "calling " + name + "…"
+	}
+}
+
 // MarkDone flips the state to "stream finished". The user can still
 // scroll the viewport; the view stays open until they press Esc.
 func (v DiagnoseView) MarkDone() DiagnoseView {

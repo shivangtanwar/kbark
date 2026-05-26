@@ -35,6 +35,13 @@ const (
 // tool layer. Independent of LogTailLines so we can tune them separately.
 const ToolLogTailLines int64 = 500
 
+// MaxToolResultBytes caps the size of any single tool result returned to
+// the model. Large blobs (a full Pod YAML, a 500-line log tail) push
+// context size past the model's effective working window and degrade
+// convergence — better to truncate aggressively and let the model
+// follow up with a tighter query.
+const MaxToolResultBytes = 4000
+
 // Dispatcher routes a ToolCallEvent to the right K8s API call and formats
 // the result as text for the model. All operations are read-only and
 // scoped to the verbs in kube.AllowedVerbs.
@@ -128,21 +135,40 @@ func (d *Dispatcher) Tools() []ai.Tool {
 // (unknown tool, malformed JSON). API-level failures get rendered into
 // the result string so the model can interpret them ("not found",
 // "forbidden", …) instead of treating them as crash-worthy.
+//
+// Successful results are truncated to MaxToolResultBytes so a verbose
+// payload (full Pod YAML, large log tail) doesn't bloat the conversation
+// context and stall convergence.
 func (d *Dispatcher) Dispatch(ctx context.Context, call ai.ToolCallEvent) (string, error) {
+	var (
+		result string
+		err    error
+	)
 	switch call.Name {
 	case ToolGetEvents:
-		return d.getEvents(ctx, call.Arguments)
+		result, err = d.getEvents(ctx, call.Arguments)
 	case ToolGetLogs:
-		return d.getLogs(ctx, call.Arguments, false)
+		result, err = d.getLogs(ctx, call.Arguments, false)
 	case ToolGetPreviousLogs:
-		return d.getLogs(ctx, call.Arguments, true)
+		result, err = d.getLogs(ctx, call.Arguments, true)
 	case ToolDescribePod:
-		return d.describePod(ctx, call.Arguments)
+		result, err = d.describePod(ctx, call.Arguments)
 	case ToolGetResource:
-		return d.getResource(ctx, call.Arguments)
+		result, err = d.getResource(ctx, call.Arguments)
 	default:
 		return "", fmt.Errorf("unknown tool %q", call.Name)
 	}
+	if err != nil {
+		return result, err
+	}
+	return truncateResult(result), nil
+}
+
+func truncateResult(s string) string {
+	if len(s) <= MaxToolResultBytes {
+		return s
+	}
+	return s[:MaxToolResultBytes] + "\n... (truncated; ask a more specific tool)"
 }
 
 // ---- per-tool input types and implementations ----

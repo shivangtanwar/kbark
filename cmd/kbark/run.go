@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
+	"k8s.io/client-go/dynamic"
 
 	"github.com/shivangtanwar/kbark/internal/ai"
 	"github.com/shivangtanwar/kbark/internal/diagnose"
@@ -57,6 +58,17 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	logService := kube.NewLogService(clientset, ctx)
 	podContextBuilder := diagnose.NewPodContextBuilder(clientset)
 
+	// Dynamic client powers the get_resource tool. If the rest config
+	// build fails for some reason, the dispatcher gracefully reports a
+	// helpful message instead of crashing on `?`.
+	var dynClient dynamic.Interface
+	if restCfg, err := kube.RESTConfig(kubeFlags); err == nil {
+		if c, err := dynamic.NewForConfig(restCfg); err == nil {
+			dynClient = c
+		}
+	}
+	dispatcher := diagnose.NewDispatcher(clientset, dynClient)
+
 	// AI is optional. If the env isn't set we let the TUI start and
 	// surface the configuration error inside the diagnose modal when the
 	// user actually presses `?`.
@@ -74,6 +86,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		PodsDone:          podsDone,
 		LogService:        logService,
 		PodContextBuilder: podContextBuilder,
+		ToolDispatcher:    dispatcher,
 		AIProvider:        aiProvider,
 		AIModel:           defaultAIModel,
 	})

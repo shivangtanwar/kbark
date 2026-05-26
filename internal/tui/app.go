@@ -45,6 +45,7 @@ type ModelDeps struct {
 	PodsDone          <-chan struct{}
 	LogService        *kube.LogService
 	PodContextBuilder *diagnose.PodContextBuilder
+	ToolDispatcher    *diagnose.Dispatcher
 	AIProvider        ai.Provider
 	AIModel           string
 }
@@ -71,6 +72,7 @@ type Model struct {
 	podService     *kube.PodService
 	logService     *kube.LogService
 	podContextBldr *diagnose.PodContextBuilder
+	toolDispatcher *diagnose.Dispatcher
 	aiProvider     ai.Provider
 	aiModel        string
 
@@ -108,6 +110,7 @@ func NewModel(deps ModelDeps) Model {
 		podService:     deps.PodService,
 		logService:     deps.LogService,
 		podContextBldr: deps.PodContextBuilder,
+		toolDispatcher: deps.ToolDispatcher,
 		aiProvider:     deps.AIProvider,
 		aiModel:        deps.AIModel,
 		podsCh:         deps.PodsCh,
@@ -161,6 +164,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DiagnosisDeltaMsg:
 		m.diagnoseView = m.diagnoseView.AppendText(msg.Text)
+		return m, waitForDiagnoseEvent(m.diagnoseEventsCh)
+
+	case DiagnosisToolCallMsg:
+		m.diagnoseView = m.diagnoseView.AppendToolCall(msg.Name)
 		return m, waitForDiagnoseEvent(m.diagnoseEventsCh)
 
 	case DiagnosisDoneMsg:
@@ -287,7 +294,7 @@ func (m Model) openDiagnose() (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	return m, startDiagnosis(m.ctx, m.podContextBldr, m.aiProvider, m.aiModel, pod)
+	return m, startDiagnosis(m.ctx, m.podContextBldr, m.toolDispatcher, m.aiProvider, m.aiModel, pod)
 }
 
 func (m Model) closeDiagnose() (Model, tea.Cmd) {
@@ -406,17 +413,20 @@ func (m Model) contentHeight() int {
 
 // startDiagnosis builds the pod context payload (cheap API calls under a
 // 3s log-read budget) and opens a streaming session. Returned as a Cmd so
-// the UI isn't blocked while context assembly is in flight.
+// the UI isn't blocked while context assembly is in flight. The session
+// runs the tool-call loop internally; dispatcher may be nil for
+// providers that don't support tools (Ollama falls back to one-shot).
 func startDiagnosis(
 	ctx context.Context,
 	builder *diagnose.PodContextBuilder,
+	dispatcher *diagnose.Dispatcher,
 	provider ai.Provider,
 	model string,
 	pod *corev1.Pod,
 ) tea.Cmd {
 	return func() tea.Msg {
 		payload := builder.Build(ctx, pod)
-		session := diagnose.Start(ctx, provider, model, payload)
+		session := diagnose.Start(ctx, provider, model, payload, dispatcher)
 		return DiagnosisStartedMsg{Session: session, Pod: pod}
 	}
 }
@@ -442,8 +452,10 @@ func waitForDiagnoseEvent(ch <-chan ai.Event) tea.Cmd {
 		case ai.ErrorEvent:
 			return DiagnosisErrorMsg{Err: e.Err}
 		case ai.ToolCallEvent:
-			// M6 handles these. For now, ignore so the stream keeps flowing.
-			return nil
+			// Must surface a real message: a nil return ends the Cmd
+			// without re-issuing waitForDiagnoseEvent, which stalls the
+			// pump and wedges the session (see DiagnosisToolCallMsg).
+			return DiagnosisToolCallMsg{Name: e.Name}
 		}
 		return nil
 	}
