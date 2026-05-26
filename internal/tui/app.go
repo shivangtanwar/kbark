@@ -166,6 +166,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.diagnoseView = m.diagnoseView.AppendText(msg.Text)
 		return m, waitForDiagnoseEvent(m.diagnoseEventsCh)
 
+	case DiagnosisToolCallMsg:
+		m.diagnoseView = m.diagnoseView.AppendToolCall(msg.Name)
+		return m, waitForDiagnoseEvent(m.diagnoseEventsCh)
+
 	case DiagnosisDoneMsg:
 		m.diagnoseView = m.diagnoseView.MarkDone()
 		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
@@ -448,8 +452,10 @@ func waitForDiagnoseEvent(ch <-chan ai.Event) tea.Cmd {
 		case ai.ErrorEvent:
 			return DiagnosisErrorMsg{Err: e.Err}
 		case ai.ToolCallEvent:
-			// M6 handles these. For now, ignore so the stream keeps flowing.
-			return nil
+			// Must surface a real message: a nil return ends the Cmd
+			// without re-issuing waitForDiagnoseEvent, which stalls the
+			// pump and wedges the session (see DiagnosisToolCallMsg).
+			return DiagnosisToolCallMsg{Name: e.Name}
 		}
 		return nil
 	}

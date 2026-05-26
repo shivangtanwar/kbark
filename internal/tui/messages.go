@@ -44,6 +44,15 @@ type DiagnosisDeltaMsg struct {
 	Text string
 }
 
+// DiagnosisToolCallMsg fires when the model calls a tool mid-diagnosis.
+// The Model must re-issue waitForDiagnoseEvent on receipt — without a
+// message the bubbletea Cmd loop stops pumping the events channel, the
+// session's buffer fills, and the whole diagnosis wedges. Carries the
+// tool name for the M6.3 breadcrumb line.
+type DiagnosisToolCallMsg struct {
+	Name string
+}
+
 // DiagnosisDoneMsg fires when the AI provider emits its DoneEvent.
 type DiagnosisDoneMsg struct {
 	StopReason string
