@@ -93,6 +93,8 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		kinds.DaemonSets(),
 		kinds.Jobs(),
 		kinds.CronJobs(),
+		kinds.Events(),
+		kinds.Nodes(),
 	)
 	resourceServices := map[string]*kube.ResourceService{}
 	for _, key := range registry.Keys() {

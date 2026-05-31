@@ -67,6 +67,16 @@ func TestPlugins_haveValidShape(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
 			Spec:       batchv1.CronJobSpec{Schedule: "*/5 * * * *"},
 		}},
+		{"events", kinds.Events(), "ev", &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: "demo"},
+			Type:           "Warning",
+			Reason:         "Backoff",
+			Message:        "Back-off restarting failed container",
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "cause-crash"},
+		}},
+		{"nodes", kinds.Nodes(), "no", &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -89,9 +99,6 @@ func TestPlugins_haveValidShape(t *testing.T) {
 			if len(row) != len(tc.plugin.Columns) {
 				t.Errorf("Row cells = %d, Columns = %d (must match)", len(row), len(tc.plugin.Columns))
 			}
-			if row[0] != "demo" {
-				t.Errorf("Row[0] = %q, want %q (first cell must be name so SelectedObject can match)", row[0], "demo")
-			}
 		})
 	}
 }
@@ -106,6 +113,7 @@ func TestPlugins_rowSurvivesWrongType(t *testing.T) {
 		kinds.Pods(), kinds.Deployments(), kinds.Services(),
 		kinds.ConfigMaps(), kinds.Secrets(), kinds.Ingresses(),
 		kinds.StatefulSets(), kinds.DaemonSets(), kinds.Jobs(), kinds.CronJobs(),
+		kinds.Events(), kinds.Nodes(),
 	}
 	for _, p := range allPlugins {
 		row := p.Row(wrong)
@@ -149,5 +157,25 @@ func TestRegistry_lookupAndKeys(t *testing.T) {
 	}
 	if _, ok := r.Lookup("nope"); ok {
 		t.Error(`Lookup("nope") = true, want false`)
+	}
+}
+
+// TestNodes_isClusterScoped pins the Scope field — Nodes must be
+// Cluster so the ResourceService bypasses the user's active namespace.
+// Every other shipped kind stays Namespaced (default).
+func TestNodes_isClusterScoped(t *testing.T) {
+	if kinds.Nodes().Scope != kinds.Cluster {
+		t.Errorf("Nodes().Scope = %v, want kinds.Cluster", kinds.Nodes().Scope)
+	}
+	namespaced := []kinds.Plugin{
+		kinds.Pods(), kinds.Deployments(), kinds.Services(),
+		kinds.ConfigMaps(), kinds.Secrets(), kinds.Ingresses(),
+		kinds.StatefulSets(), kinds.DaemonSets(), kinds.Jobs(), kinds.CronJobs(),
+		kinds.Events(),
+	}
+	for _, p := range namespaced {
+		if p.Scope != kinds.Namespaced {
+			t.Errorf("%s.Scope = %v, want kinds.Namespaced", p.Key, p.Scope)
+		}
 	}
 }

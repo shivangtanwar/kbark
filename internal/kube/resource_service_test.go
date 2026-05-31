@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/shivangtanwar/kbark/internal/kube"
@@ -78,5 +80,40 @@ func TestResourceService_kindAccessor(t *testing.T) {
 	svc := kube.NewResourceService(cs, kube.DefaultResyncInterval, ctx, kinds.Deployments())
 	if got := svc.Kind(); got != "dep" {
 		t.Errorf("Kind() = %q, want %q", got, "dep")
+	}
+}
+
+// TestResourceService_clusterScopedIgnoresNamespace pins the Scope
+// contract: a cluster-scoped plugin (Nodes) lists every node
+// regardless of what namespace was passed to Switch. The fake
+// clientset stores nodes without a namespace, so passing "kube-system"
+// would normally return zero results from a namespace-scoped informer;
+// the Cluster scope must override and surface the node anyway.
+func TestResourceService_clusterScopedIgnoresNamespace(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if _, err := cs.CoreV1().Nodes().Create(
+		ctx,
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+		metav1.CreateOptions{},
+	); err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	svc := kube.NewResourceService(cs, kube.DefaultResyncInterval, ctx, kinds.Nodes())
+	ch, _, err := svc.Switch("kube-system") // deliberately a namespace — Scope=Cluster must ignore it
+	if err != nil {
+		t.Fatalf("Switch: %v", err)
+	}
+
+	select {
+	case objs := <-ch:
+		if len(objs) != 1 {
+			t.Fatalf("got %d nodes, want 1 (Scope=Cluster should ignore namespace)", len(objs))
+		}
+	case <-time.After(snapshotTimeout):
+		t.Fatal("no snapshot within timeout")
 	}
 }

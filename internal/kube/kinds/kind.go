@@ -12,6 +12,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+// Scope is the namespace shape of a resource kind. Most kinds are
+// Namespaced — their informer is scoped to one namespace at a time and
+// `:ns` re-targets them. Cluster-scoped kinds (nodes, namespaces,
+// cluster-roles, …) ignore the active namespace entirely.
+type Scope int
+
+const (
+	// Namespaced is the default — informer factory is built with
+	// WithNamespace(currentNamespace).
+	Namespaced Scope = iota
+	// Cluster causes the resource service to always build the
+	// informer factory without a namespace filter, regardless of the
+	// user's active namespace.
+	Cluster
+)
+
 // Plugin is the per-kind plug-in surface. Everything kbark needs to
 // list, render, and route a resource kind is captured here.
 //
@@ -28,11 +44,18 @@ type Plugin struct {
 	DisplayName string
 	// GVR identifies the resource for informer/lister access.
 	GVR schema.GroupVersionResource
+	// Scope is Namespaced by default; set to Cluster for kinds like
+	// nodes that aren't namespace-bound.
+	Scope Scope
 	// Columns are the table headers in the order Row produces them.
 	Columns []table.Column
-	// Row maps one cached object into a table row. Must produce exactly
-	// len(Columns) cells. The first cell is always the resource name (the
-	// view's SelectedObject uses it to look up the typed object).
+	// Row maps one cached object into a table row. Must produce
+	// exactly len(Columns) cells. The first cell can be whatever
+	// makes sense for the kind — the view's SelectedObject indexes
+	// into a parallel objects slice by cursor position, not by
+	// matching cell text, so columns are free to be semantic
+	// (e.g. events lead with LAST SEEN rather than the synthetic
+	// event name).
 	Row func(runtime.Object) table.Row
 }
 
