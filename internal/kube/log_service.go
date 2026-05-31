@@ -9,9 +9,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// LogService owns the lifecycle of pod log streamers. Each call to Stream
-// cancels the previous streamer (if any) and opens a new one. This mirrors
-// the PodService pattern used for pod-list informers.
+// LogService owns the lifecycle of pod log streamers. Each call to
+// Stream cancels the previous streamer (if any) and opens a new one,
+// mirroring the cancel-and-replace lifecycle used by ResourceService
+// for informers.
 //
 // Use case: the user opens the logs view on pod A, then navigates to pod B
 // and opens logs on B. The streamer for A needs to be torn down so its

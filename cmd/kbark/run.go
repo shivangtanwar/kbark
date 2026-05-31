@@ -52,11 +52,6 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	}
 
 	namespace, _, _ := kubeFlags.ToRawKubeConfigLoader().Namespace()
-	podService := kube.NewPodService(clientset, kube.DefaultResyncInterval, ctx)
-	podsCh, podsDone, err := podService.Switch(namespace)
-	if err != nil {
-		return fmt.Errorf("start pod informer: %w", err)
-	}
 	logService := kube.NewLogService(clientset, ctx)
 	podContextBuilder := diagnose.NewPodContextBuilder(clientset)
 
@@ -79,10 +74,9 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		aiProvider = p
 	}
 
-	// Kind registry + per-kind resource services. Pods stay on the
-	// legacy typed PodService path (the diagnose `?` flow needs
-	// typed *corev1.Pod). The pod plugin is registered so M2.2 can
-	// refactor PodView onto TableResourceView as a deletion job.
+	// Kind registry + one ResourceService per kind. Pods are no
+	// longer a special case — they go through the same plumbing as
+	// every other kind, with "po" being the default home view.
 	registry := kinds.NewRegistry(
 		kinds.Pods(),
 		kinds.Deployments(),
@@ -99,11 +93,16 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	)
 	resourceServices := map[string]*kube.ResourceService{}
 	for _, key := range registry.Keys() {
-		if key == "po" {
-			continue
-		}
 		p, _ := registry.Lookup(key)
 		resourceServices[key] = kube.NewResourceService(clientset, kube.DefaultResyncInterval, ctx, p)
+	}
+
+	// Pre-Switch the home kind so the TUI's first paint shows live
+	// data instead of an empty table.
+	const homeKind = "po"
+	homeCh, homeDone, err := resourceServices[homeKind].Switch(namespace)
+	if err != nil {
+		return fmt.Errorf("start %s informer: %w", homeKind, err)
 	}
 
 	// kubectl/describe via ConfigFlags as the RESTClientGetter.
@@ -115,9 +114,6 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		Ctx:               ctx,
 		Flags:             kubeFlags,
 		Profile:           profileFlag,
-		PodService:        podService,
-		PodsCh:            podsCh,
-		PodsDone:          podsDone,
 		LogService:        logService,
 		PodContextBuilder: podContextBuilder,
 		ToolDispatcher:    dispatcher,
@@ -126,6 +122,9 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		DescribeService:   describeService,
 		KindRegistry:      registry,
 		ResourceServices:  resourceServices,
+		HomeKind:          homeKind,
+		HomeCh:            homeCh,
+		HomeDone:          homeDone,
 	})
 
 	p := tea.NewProgram(

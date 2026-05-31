@@ -33,17 +33,16 @@ import (
 type ActiveView int
 
 const (
-	ViewPods ActiveView = iota
+	// ViewResource is the home: a TableResourceView for whatever kind
+	// the user is currently looking at. Pods (kind="po") is the
+	// default landing; `:dep`/`:svc`/etc. swap in the corresponding
+	// kind. Pod-specific keys (l, ?) are gated on resourceKind=="po".
+	ViewResource ActiveView = iota
 	ViewLogs
 	ViewDiagnose
-	// ViewResource hosts any non-pod resource kind (deployments,
-	// services, …) via the kind-generic TableResourceView. Pods stay
-	// on their own ViewPods slot in M2.1 so the diagnose `?` flow's
-	// typed *corev1.Pod access remains untouched.
-	ViewResource
 	// ViewDescribe is the Enter-key modal: kubectl-style describe text
-	// + a `y`-toggle to raw YAML. Stacks over whichever resource view
-	// was active so esc returns there.
+	// + a `y`-toggle to raw YAML. Stacks over the resource view so
+	// esc returns there.
 	ViewDescribe
 )
 
@@ -53,9 +52,6 @@ type ModelDeps struct {
 	Ctx               context.Context
 	Flags             *genericclioptions.ConfigFlags
 	Profile           string
-	PodService        *kube.PodService
-	PodsCh            <-chan []*corev1.Pod
-	PodsDone          <-chan struct{}
 	LogService        *kube.LogService
 	PodContextBuilder *diagnose.PodContextBuilder
 	ToolDispatcher    *diagnose.Dispatcher
@@ -65,13 +61,21 @@ type ModelDeps struct {
 	// REST config could be built at startup; the modal then surfaces
 	// YAML only and shows an actionable error for the describe text.
 	DescribeService *describe.Service
-	// KindRegistry lists every non-pod resource kind known to the
-	// cmdbar. Pods stay on the legacy typed PodService path.
+	// KindRegistry lists every resource kind known to the cmdbar,
+	// including pods. The default home view is whichever kind matches
+	// HomeKind (typically "po").
 	KindRegistry *kinds.Registry
-	// ResourceServices is keyed by Plugin.Key. Pre-built at startup so
-	// switching to a kind is one Switch() call; no informer runs until
-	// the user first asks for that kind.
+	// ResourceServices is keyed by Plugin.Key. Includes "po"; pods
+	// have no special path anymore.
 	ResourceServices map[string]*kube.ResourceService
+	// HomeKind is the kind shown at startup and returned to on `:po`
+	// or on namespace switch. Typically "po".
+	HomeKind string
+	// HomeCh / HomeDone are the pre-Switched channels for HomeKind so
+	// the first paint shows live data without waiting for a Switch()
+	// call inside the bubbletea loop.
+	HomeCh   <-chan []runtime.Object
+	HomeDone <-chan struct{}
 }
 
 // Model is the root bubbletea model.
@@ -88,14 +92,11 @@ type Model struct {
 	namespace   string
 
 	active       ActiveView
-	prevActive   ActiveView
-	podView      views.PodView
 	logsView     views.LogsView
 	diagnoseView views.DiagnoseView
 	describeView views.DescribeView
 	cmdbar       components.Cmdbar
 
-	podService      *kube.PodService
 	logService      *kube.LogService
 	podContextBldr  *diagnose.PodContextBuilder
 	toolDispatcher  *diagnose.Dispatcher
@@ -103,8 +104,6 @@ type Model struct {
 	aiModel         string
 	describeService *describe.Service
 
-	podsCh           <-chan []*corev1.Pod
-	podsDone         <-chan struct{}
 	logsCh           <-chan []string
 	logsDone         <-chan struct{}
 	diagnoseSession  *diagnose.Session
@@ -116,6 +115,7 @@ type Model struct {
 	resourceCh       <-chan []runtime.Object
 	resourceDone     <-chan struct{}
 	resourceKind     string
+	homeKind         string
 
 	footer components.Footer
 	keys   KeyMap
@@ -129,41 +129,54 @@ func NewModel(deps ModelDeps) Model {
 	if parentCtx == nil {
 		parentCtx = context.Background()
 	}
-	return Model{
+	homeKind := deps.HomeKind
+	if homeKind == "" {
+		homeKind = "po"
+	}
+
+	m := Model{
 		ctx:              parentCtx,
 		flags:            deps.Flags,
 		profile:          deps.Profile,
 		mode:             "RO",
 		contextName:      ctxName,
 		namespace:        ns,
-		active:           ViewPods,
-		podView:          views.NewPodView(th),
+		active:           ViewResource,
 		logsView:         views.NewLogsView(th),
 		diagnoseView:     views.NewDiagnoseView(th),
 		describeView:     views.NewDescribeView(th),
 		cmdbar:           components.NewCmdbar(th),
-		podService:       deps.PodService,
 		logService:       deps.LogService,
 		podContextBldr:   deps.PodContextBuilder,
 		toolDispatcher:   deps.ToolDispatcher,
 		aiProvider:       deps.AIProvider,
 		aiModel:          deps.AIModel,
 		describeService:  deps.DescribeService,
-		podsCh:           deps.PodsCh,
-		podsDone:         deps.PodsDone,
 		registry:         deps.KindRegistry,
 		resourceServices: deps.ResourceServices,
+		homeKind:         homeKind,
+		resourceKind:     homeKind,
+		resourceCh:       deps.HomeCh,
+		resourceDone:     deps.HomeDone,
 		footer:           components.NewFooter(th),
 		keys:             DefaultKeyMap(),
 		th:               th,
 	}
+	// Mount the home view if we know the plugin. Lazy fallback if
+	// registry was never wired (tests).
+	if deps.KindRegistry != nil {
+		if p, ok := deps.KindRegistry.Lookup(homeKind); ok {
+			m.resourceView = views.NewTableResourceView(th, p)
+		}
+	}
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	if m.podsCh == nil {
+	if m.resourceCh == nil {
 		return nil
 	}
-	return waitForPods(m.podsCh, m.podsDone)
+	return waitForResource(m.resourceCh, m.resourceDone, m.resourceKind)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -171,7 +184,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.podView = m.podView.SetSize(m.width, m.contentHeight())
 		m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
 		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
 		m.describeView = m.describeView.SetSize(m.width, m.contentHeight())
@@ -182,10 +194,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
-
-	case PodsUpdatedMsg:
-		m.podView = m.podView.SetPods(msg.Pods)
-		return m, waitForPods(m.podsCh, m.podsDone)
 
 	case NamespaceChangedMsg:
 		return m.handleNamespaceChange(msg.Namespace)
@@ -278,17 +286,31 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.active {
-	case ViewPods:
+	case ViewResource:
 		switch msg.String() {
-		case "l":
-			return m.openLogs()
-		case "?":
-			return m.openDiagnose()
 		case "enter":
-			return m.openDescribeForPod()
+			return m.openDescribeForResource()
+		case "esc":
+			// On the home kind, esc is a no-op (we're already at
+			// the top). On any other kind, esc returns to home.
+			if m.resourceKind == m.homeKind {
+				return m, nil
+			}
+			return m.switchToHome()
+		}
+		// Pod-specific keys are gated on the pod kind. M7 will
+		// generalise `?` (and possibly `l`) to other kinds via the
+		// kind-aware context builders.
+		if m.resourceKind == "po" {
+			switch msg.String() {
+			case "l":
+				return m.openLogs()
+			case "?":
+				return m.openDiagnose()
+			}
 		}
 		var cmd tea.Cmd
-		m.podView, cmd = m.podView.Update(msg)
+		m.resourceView, cmd = m.resourceView.Update(msg)
 		return m, cmd
 
 	case ViewLogs:
@@ -311,17 +333,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.diagnoseView, cmd = m.diagnoseView.Update(msg)
 		return m, cmd
 
-	case ViewResource:
-		switch msg.String() {
-		case "esc":
-			return m.closeResource()
-		case "enter":
-			return m.openDescribeForResource()
-		}
-		var cmd tea.Cmd
-		m.resourceView, cmd = m.resourceView.Update(msg)
-		return m, cmd
-
 	case ViewDescribe:
 		switch msg.String() {
 		case "esc":
@@ -337,8 +348,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// selectedPod is the typed accessor for the pod path's logs/diagnose
+// flows. Returns nil when the active kind isn't pods, the view is
+// empty, or the selected object somehow isn't a Pod (defensive — the
+// "po" plugin only ever stores *corev1.Pod).
+func (m Model) selectedPod() *corev1.Pod {
+	if m.resourceKind != "po" || m.resourceView == nil {
+		return nil
+	}
+	obj := m.resourceView.SelectedObject()
+	pod, _ := obj.(*corev1.Pod)
+	return pod
+}
+
 func (m Model) openLogs() (Model, tea.Cmd) {
-	pod := m.podView.SelectedPod()
+	pod := m.selectedPod()
 	if pod == nil || m.logService == nil {
 		return m, nil
 	}
@@ -363,14 +387,14 @@ func (m Model) closeLogs() (Model, tea.Cmd) {
 	if m.logService != nil {
 		m.logService.Stop()
 	}
-	m.active = ViewPods
+	m.active = ViewResource
 	m.logsCh = nil
 	m.logsDone = nil
 	return m, nil
 }
 
 func (m Model) openDiagnose() (Model, tea.Cmd) {
-	pod := m.podView.SelectedPod()
+	pod := m.selectedPod()
 	if pod == nil {
 		return m, nil
 	}
@@ -395,12 +419,11 @@ func (m Model) closeDiagnose() (Model, tea.Cmd) {
 		m.diagnoseSession = nil
 	}
 	m.diagnoseEventsCh = nil
-	m.active = ViewPods
+	m.active = ViewResource
 	return m, nil
 }
 
 func (m *Model) resizeAll() {
-	m.podView = m.podView.SetSize(m.width, m.contentHeight())
 	m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
 	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
 	m.describeView = m.describeView.SetSize(m.width, m.contentHeight())
@@ -420,11 +443,6 @@ func (m Model) submitCmd() (Model, tea.Cmd) {
 	}
 	if len(parts) == 1 {
 		key := parts[0]
-		if key == "po" {
-			m.cmdbar = m.cmdbar.Deactivate()
-			m.resizeAll()
-			return m.switchToPods()
-		}
 		if m.registry != nil {
 			if p, ok := m.registry.Lookup(key); ok {
 				m.cmdbar = m.cmdbar.Deactivate()
@@ -437,10 +455,10 @@ func (m Model) submitCmd() (Model, tea.Cmd) {
 	return m, nil
 }
 
-// switchToResource activates (or re-activates) the view for one
-// non-pod kind. Calls Switch on the per-kind service to (re)start its
-// informer scoped to the current namespace, builds a fresh
-// TableResourceView, and starts pumping snapshots.
+// switchToResource (re)mounts the view for a kind. Tears down any
+// stacked modal, calls Switch on the per-kind service to bind a
+// fresh informer in the current namespace, and starts the pump.
+// Pods is just another kind — no special path.
 func (m Model) switchToResource(p kinds.Plugin) (Model, tea.Cmd) {
 	if m.resourceServices == nil {
 		m.cmdbar = m.cmdbar.Activate().SetError("resource services not configured")
@@ -463,9 +481,8 @@ func (m Model) switchToResource(p kinds.Plugin) (Model, tea.Cmd) {
 	m.resourceDone = done
 	m.resourceKind = p.Key
 	m.active = ViewResource
-	// Also drop any modal stacked on the previous view — logs/diagnose
-	// were bound to the prior kind's selection, so they're meaningless
-	// here.
+	// Drop any stacked modal — its selection was bound to the prior
+	// kind and is meaningless now.
 	m.logsCh, m.logsDone, m.diagnoseEventsCh = nil, nil, nil
 	if m.diagnoseSession != nil {
 		m.diagnoseSession.Cancel()
@@ -474,36 +491,23 @@ func (m Model) switchToResource(p kinds.Plugin) (Model, tea.Cmd) {
 	return m, waitForResource(ch, done, p.Key)
 }
 
-// switchToPods returns to the (always-running) pod view. The pod
-// informer never stops, so no Switch call is needed — just flip
-// active back. Any resource-view state is left intact so re-entering
-// the previous :<kind> is instant.
-func (m Model) switchToPods() (Model, tea.Cmd) {
-	m.active = ViewPods
-	return m, nil
-}
-
-// closeResource is the `esc` handler on ViewResource. We don't stop
-// the per-kind informer here (cheap to keep running for next time);
-// future M9 polish can add a stop-on-close protocol if memory grows.
-func (m Model) closeResource() (Model, tea.Cmd) {
-	m.active = ViewPods
-	return m, nil
-}
-
-// openDescribeForPod is the Enter handler on ViewPods.
-func (m Model) openDescribeForPod() (Model, tea.Cmd) {
-	pod := m.podView.SelectedPod()
-	if pod == nil {
+// switchToHome returns to the home kind (typically pods). Used by
+// esc on a non-home kind and by namespace change. Looks up the home
+// plugin from the registry and delegates to switchToResource.
+func (m Model) switchToHome() (Model, tea.Cmd) {
+	if m.registry == nil {
 		return m, nil
 	}
-	m.prevActive = ViewPods
-	return m.openDescribe(kinds.Pods(), pod, pod.Namespace, pod.Name)
+	p, ok := m.registry.Lookup(m.homeKind)
+	if !ok {
+		return m, nil
+	}
+	return m.switchToResource(p)
 }
 
 // openDescribeForResource is the Enter handler on ViewResource.
-// Pulls the typed object from the active view, looks up its plugin
-// from the registry, and reuses the shared modal-open path.
+// Works for every kind including pods (post-refactor pods are just
+// another kind).
 func (m Model) openDescribeForResource() (Model, tea.Cmd) {
 	if m.resourceView == nil || m.registry == nil {
 		return m, nil
@@ -520,7 +524,6 @@ func (m Model) openDescribeForResource() (Model, tea.Cmd) {
 	if err != nil {
 		return m, nil
 	}
-	m.prevActive = ViewResource
 	return m.openDescribe(plugin, obj, accessor.GetNamespace(), accessor.GetName())
 }
 
@@ -551,17 +554,11 @@ func (m Model) openDescribe(plugin kinds.Plugin, obj runtime.Object, namespace, 
 	return m, fetchDescribe(m.ctx, m.describeService, plugin, namespace, name)
 }
 
-// closeDescribe returns to whichever view was active when Enter
-// opened the modal. The previous view's state (selection, snapshot
-// pump) wasn't touched, so it picks up where it left off.
+// closeDescribe returns to the resource view (the only view the
+// modal can be opened from). The view's snapshot pump wasn't
+// touched, so it picks up where it left off.
 func (m Model) closeDescribe() (Model, tea.Cmd) {
-	m.active = m.prevActive
-	if m.active != ViewPods && m.active != ViewResource {
-		// Defensive — should not happen, but if prevActive somehow
-		// points at a modal view (e.g. tests construct a Model
-		// directly), land on pods rather than infinite-loop.
-		m.active = ViewPods
-	}
+	m.active = ViewResource
 	return m, nil
 }
 
@@ -578,41 +575,20 @@ func fetchDescribe(ctx context.Context, svc *describe.Service, plugin kinds.Plug
 }
 
 func (m Model) handleNamespaceChange(namespace string) (Model, tea.Cmd) {
-	if m.podService == nil {
-		m.namespace = namespace
-		return m, nil
-	}
-	ch, done, err := m.podService.Switch(namespace)
-	if err != nil {
-		m.cmdbar = m.cmdbar.Activate().SetError("switch failed: " + err.Error())
-		return m, nil
-	}
 	m.namespace = namespace
-	m.podsCh = ch
-	m.podsDone = done
-	m.podView = m.podView.SetPods(nil)
-	// Namespace switch always returns to the pod view; any in-flight
-	// diagnose or logs stream for a now-foreign pod becomes meaningless.
-	if m.active != ViewPods {
-		if m.logService != nil {
-			m.logService.Stop()
-		}
-		if m.diagnoseSession != nil {
-			m.diagnoseSession.Cancel()
-			m.diagnoseSession = nil
-		}
-		m.active = ViewPods
-		m.logsCh = nil
-		m.logsDone = nil
-		m.diagnoseEventsCh = nil
-		// Drop any resource view too — it was scoped to the prior
-		// namespace. User can re-enter via `:<kind>`.
-		m.resourceView = nil
-		m.resourceCh = nil
-		m.resourceDone = nil
-		m.resourceKind = ""
+	// Drop any stacked modal — pod logs and diagnose were bound to
+	// the prior namespace's selection and are now meaningless.
+	if m.logService != nil {
+		m.logService.Stop()
 	}
-	return m, waitForPods(ch, done)
+	if m.diagnoseSession != nil {
+		m.diagnoseSession.Cancel()
+		m.diagnoseSession = nil
+	}
+	m.logsCh, m.logsDone, m.diagnoseEventsCh = nil, nil, nil
+	// Re-switch the home kind on the new namespace. switchToResource
+	// reads m.namespace, so the new value lands automatically.
+	return m.switchToHome()
 }
 
 func (m Model) View() string {
@@ -625,14 +601,12 @@ func (m Model) View() string {
 		content = m.logsView.View()
 	case ViewDiagnose:
 		content = m.diagnoseView.View()
-	case ViewResource:
-		if m.resourceView != nil {
-			content = m.resourceView.View()
-		}
 	case ViewDescribe:
 		content = m.describeView.View()
 	default:
-		content = m.podView.View()
+		if m.resourceView != nil {
+			content = m.resourceView.View()
+		}
 	}
 	parts := []string{content}
 	if m.cmdbar.Active() {
@@ -658,13 +632,15 @@ func (m Model) helpForView() string {
 		return "esc back · " + followKey + " · q quit · ? AI"
 	case ViewDiagnose:
 		return "esc dismiss · q quit"
-	case ViewResource:
-		return "esc back · q quit · : cmd"
 	case ViewDescribe:
 		return "y toggle · esc back · q quit"
-	default:
-		return "l logs · ↵ describe · ? AI · q quit · : cmd"
+	case ViewResource:
+		if m.resourceKind == "po" {
+			return "l logs · ↵ describe · ? AI · q quit · : cmd"
+		}
+		return "esc back · ↵ describe · q quit · : cmd"
 	}
+	return ""
 }
 
 func (m Model) contentHeight() int {
@@ -728,20 +704,6 @@ func waitForDiagnoseEvent(ch <-chan ai.Event) tea.Cmd {
 	}
 }
 
-func waitForPods(ch <-chan []*corev1.Pod, done <-chan struct{}) tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case pods, ok := <-ch:
-			if !ok {
-				return nil
-			}
-			return PodsUpdatedMsg{Pods: pods}
-		case <-done:
-			return nil
-		}
-	}
-}
-
 func waitForLogs(ch <-chan []string, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		if ch == nil {
@@ -760,9 +722,9 @@ func waitForLogs(ch <-chan []string, done <-chan struct{}) tea.Cmd {
 }
 
 // waitForResource pumps one snapshot from the active resource kind's
-// channel into a ResourceSnapshotMsg. Mirrors waitForPods semantics
-// (channel-close and done-close both end the stream), with the
-// addition of Kind so Update can drop stale snapshots after a switch.
+// channel into a ResourceSnapshotMsg. Channel-close and done-close
+// both end the stream; Kind lets Update drop stale snapshots after a
+// kind switch.
 func waitForResource(ch <-chan []runtime.Object, done <-chan struct{}, kind string) tea.Cmd {
 	return func() tea.Msg {
 		if ch == nil {

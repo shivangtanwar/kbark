@@ -14,6 +14,18 @@ import (
 // so a slow consumer eventually re-reads stale state.
 const DefaultResyncInterval = 30 * time.Second
 
+// DefaultDebounce is the window we coalesce informer events over
+// before emitting a snapshot. Tuned to absorb the initial-sync burst
+// (a hundred objects on a fresh cluster arrive in milliseconds) into
+// a single render.
+const DefaultDebounce = 100 * time.Millisecond
+
+// SyncTimeout bounds how long ResourceLister.Start waits for the
+// informer cache to sync. Cache sync blocks indefinitely against an
+// unreachable apiserver, which would freeze the TUI before it paints;
+// a finite ceiling turns that into an actionable error.
+const SyncTimeout = 10 * time.Second
+
 // NewFactory builds a shared informer factory scoped to a single
 // namespace. Pass an empty namespace to watch across all namespaces.
 //

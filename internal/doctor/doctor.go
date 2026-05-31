@@ -62,7 +62,8 @@ func Run(ctx context.Context, kubeFlags *genericclioptions.ConfigFlags) []Result
 		})
 	}
 
-	results = append(results,
+	results = append(
+		results,
 		checkAnthropic(ctx),
 		checkOpenAI(ctx),
 		checkOllama(ctx),
