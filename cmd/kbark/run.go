@@ -16,6 +16,7 @@ import (
 	"github.com/shivangtanwar/kbark/internal/ai"
 	"github.com/shivangtanwar/kbark/internal/diagnose"
 	"github.com/shivangtanwar/kbark/internal/kube"
+	"github.com/shivangtanwar/kbark/internal/kube/kinds"
 	"github.com/shivangtanwar/kbark/internal/tui"
 )
 
@@ -77,6 +78,24 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		aiProvider = p
 	}
 
+	// Kind registry + per-kind resource services. Pods stay on the
+	// legacy typed PodService path (the diagnose `?` flow needs
+	// typed *corev1.Pod). The pod plugin is registered so M2.2 can
+	// refactor PodView onto TableResourceView as a deletion job.
+	registry := kinds.NewRegistry(
+		kinds.Pods(),
+		kinds.Deployments(),
+		kinds.Services(),
+	)
+	resourceServices := map[string]*kube.ResourceService{}
+	for _, key := range registry.Keys() {
+		if key == "po" {
+			continue
+		}
+		p, _ := registry.Lookup(key)
+		resourceServices[key] = kube.NewResourceService(clientset, kube.DefaultResyncInterval, ctx, p)
+	}
+
 	model := tui.NewModel(tui.ModelDeps{
 		Ctx:               ctx,
 		Flags:             kubeFlags,
@@ -89,6 +108,8 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		ToolDispatcher:    dispatcher,
 		AIProvider:        aiProvider,
 		AIModel:           defaultAIModel,
+		KindRegistry:      registry,
+		ResourceServices:  resourceServices,
 	})
 
 	p := tea.NewProgram(

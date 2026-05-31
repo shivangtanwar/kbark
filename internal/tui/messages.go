@@ -4,6 +4,7 @@ package tui
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/shivangtanwar/kbark/internal/diagnose"
 )
@@ -30,6 +31,23 @@ type LogsBatchMsg struct {
 // LogsEndMsg fires when the active log stream ends (EOF, error, or the
 // stream's context cancelled). The view stops issuing waitForLogs Cmds.
 type LogsEndMsg struct{}
+
+// ResourceSnapshotMsg carries a fresh snapshot for a non-pod resource
+// kind (e.g. deployments, services). Pods continue to use the typed
+// PodsUpdatedMsg path because the diagnose `?` flow needs typed
+// *corev1.Pod access — splitting at this seam lets new kinds land
+// without disturbing the pod path.
+type ResourceSnapshotMsg struct {
+	Kind    string
+	Objects []runtime.Object
+}
+
+// ResourceStreamEndMsg fires when the active resource snapshot stream
+// ends (namespace switch or service teardown). The Model stops issuing
+// waitForResource Cmds for that stream.
+type ResourceStreamEndMsg struct {
+	Kind string
+}
 
 // DiagnosisStartedMsg carries the session handle once the context has
 // been built and the provider stream has opened. The Model stashes the

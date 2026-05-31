@@ -13,11 +13,13 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	"github.com/shivangtanwar/kbark/internal/ai"
 	"github.com/shivangtanwar/kbark/internal/diagnose"
 	"github.com/shivangtanwar/kbark/internal/kube"
+	"github.com/shivangtanwar/kbark/internal/kube/kinds"
 	"github.com/shivangtanwar/kbark/internal/tui/components"
 	"github.com/shivangtanwar/kbark/internal/tui/theme"
 	"github.com/shivangtanwar/kbark/internal/tui/views"
@@ -32,6 +34,11 @@ const (
 	ViewPods ActiveView = iota
 	ViewLogs
 	ViewDiagnose
+	// ViewResource hosts any non-pod resource kind (deployments,
+	// services, …) via the kind-generic TableResourceView. Pods stay
+	// on their own ViewPods slot in M2.1 so the diagnose `?` flow's
+	// typed *corev1.Pod access remains untouched.
+	ViewResource
 )
 
 // ModelDeps bundles everything the root Model needs at construction time.
@@ -48,6 +55,13 @@ type ModelDeps struct {
 	ToolDispatcher    *diagnose.Dispatcher
 	AIProvider        ai.Provider
 	AIModel           string
+	// KindRegistry lists every non-pod resource kind known to the
+	// cmdbar. Pods stay on the legacy typed PodService path.
+	KindRegistry *kinds.Registry
+	// ResourceServices is keyed by Plugin.Key. Pre-built at startup so
+	// switching to a kind is one Switch() call; no informer runs until
+	// the user first asks for that kind.
+	ResourceServices map[string]*kube.ResourceService
 }
 
 // Model is the root bubbletea model.
@@ -83,6 +97,13 @@ type Model struct {
 	diagnoseSession  *diagnose.Session
 	diagnoseEventsCh <-chan ai.Event
 
+	registry         *kinds.Registry
+	resourceServices map[string]*kube.ResourceService
+	resourceView     views.ResourceView
+	resourceCh       <-chan []runtime.Object
+	resourceDone     <-chan struct{}
+	resourceKind     string
+
 	footer components.Footer
 	keys   KeyMap
 	th     theme.Theme
@@ -96,28 +117,30 @@ func NewModel(deps ModelDeps) Model {
 		parentCtx = context.Background()
 	}
 	return Model{
-		ctx:            parentCtx,
-		flags:          deps.Flags,
-		profile:        deps.Profile,
-		mode:           "RO",
-		contextName:    ctxName,
-		namespace:      ns,
-		active:         ViewPods,
-		podView:        views.NewPodView(th),
-		logsView:       views.NewLogsView(th),
-		diagnoseView:   views.NewDiagnoseView(th),
-		cmdbar:         components.NewCmdbar(th),
-		podService:     deps.PodService,
-		logService:     deps.LogService,
-		podContextBldr: deps.PodContextBuilder,
-		toolDispatcher: deps.ToolDispatcher,
-		aiProvider:     deps.AIProvider,
-		aiModel:        deps.AIModel,
-		podsCh:         deps.PodsCh,
-		podsDone:       deps.PodsDone,
-		footer:         components.NewFooter(th),
-		keys:           DefaultKeyMap(),
-		th:             th,
+		ctx:              parentCtx,
+		flags:            deps.Flags,
+		profile:          deps.Profile,
+		mode:             "RO",
+		contextName:      ctxName,
+		namespace:        ns,
+		active:           ViewPods,
+		podView:          views.NewPodView(th),
+		logsView:         views.NewLogsView(th),
+		diagnoseView:     views.NewDiagnoseView(th),
+		cmdbar:           components.NewCmdbar(th),
+		podService:       deps.PodService,
+		logService:       deps.LogService,
+		podContextBldr:   deps.PodContextBuilder,
+		toolDispatcher:   deps.ToolDispatcher,
+		aiProvider:       deps.AIProvider,
+		aiModel:          deps.AIModel,
+		podsCh:           deps.PodsCh,
+		podsDone:         deps.PodsDone,
+		registry:         deps.KindRegistry,
+		resourceServices: deps.ResourceServices,
+		footer:           components.NewFooter(th),
+		keys:             DefaultKeyMap(),
+		th:               th,
 	}
 }
 
@@ -136,6 +159,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.podView = m.podView.SetSize(m.width, m.contentHeight())
 		m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
 		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+		if m.resourceView != nil {
+			m.resourceView = m.resourceView.SetSize(m.width, m.contentHeight())
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -180,6 +206,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.diagnoseView = m.diagnoseView.MarkError(msg.Err)
 		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
 		m.diagnoseEventsCh = nil
+		return m, nil
+
+	case ResourceSnapshotMsg:
+		// Stale-kind guard: a switch happened between snapshot emission
+		// and Update receipt. Drop the snapshot, don't re-pump (the new
+		// kind has its own pump).
+		if m.resourceView == nil || msg.Kind != m.resourceKind {
+			return m, nil
+		}
+		m.resourceView = m.resourceView.SetObjects(msg.Objects)
+		return m, waitForResource(m.resourceCh, m.resourceDone, m.resourceKind)
+
+	case ResourceStreamEndMsg:
+		if msg.Kind == m.resourceKind {
+			m.resourceCh = nil
+			m.resourceDone = nil
+		}
 		return m, nil
 	}
 	return m, nil
@@ -240,6 +283,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.diagnoseView, cmd = m.diagnoseView.Update(msg)
+		return m, cmd
+
+	case ViewResource:
+		if msg.String() == "esc" {
+			return m.closeResource()
+		}
+		var cmd tea.Cmd
+		m.resourceView, cmd = m.resourceView.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -311,6 +362,9 @@ func (m *Model) resizeAll() {
 	m.podView = m.podView.SetSize(m.width, m.contentHeight())
 	m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
 	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+	if m.resourceView != nil {
+		m.resourceView = m.resourceView.SetSize(m.width, m.contentHeight())
+	}
 }
 
 func (m Model) submitCmd() (Model, tea.Cmd) {
@@ -322,7 +376,76 @@ func (m Model) submitCmd() (Model, tea.Cmd) {
 		ns := parts[1]
 		return m, func() tea.Msg { return NamespaceChangedMsg{Namespace: ns} }
 	}
+	if len(parts) == 1 {
+		key := parts[0]
+		if key == "po" {
+			m.cmdbar = m.cmdbar.Deactivate()
+			m.resizeAll()
+			return m.switchToPods()
+		}
+		if m.registry != nil {
+			if p, ok := m.registry.Lookup(key); ok {
+				m.cmdbar = m.cmdbar.Deactivate()
+				m.resizeAll()
+				return m.switchToResource(p)
+			}
+		}
+	}
 	m.cmdbar = m.cmdbar.SetError("unknown: " + input)
+	return m, nil
+}
+
+// switchToResource activates (or re-activates) the view for one
+// non-pod kind. Calls Switch on the per-kind service to (re)start its
+// informer scoped to the current namespace, builds a fresh
+// TableResourceView, and starts pumping snapshots.
+func (m Model) switchToResource(p kinds.Plugin) (Model, tea.Cmd) {
+	if m.resourceServices == nil {
+		m.cmdbar = m.cmdbar.Activate().SetError("resource services not configured")
+		return m, nil
+	}
+	svc, ok := m.resourceServices[p.Key]
+	if !ok {
+		m.cmdbar = m.cmdbar.Activate().SetError("no service for kind " + p.Key)
+		return m, nil
+	}
+	ch, done, err := svc.Switch(m.namespace)
+	if err != nil {
+		m.cmdbar = m.cmdbar.Activate().SetError("switch failed: " + err.Error())
+		return m, nil
+	}
+
+	view := views.NewTableResourceView(m.th, p)
+	m.resourceView = view.SetSize(m.width, m.contentHeight())
+	m.resourceCh = ch
+	m.resourceDone = done
+	m.resourceKind = p.Key
+	m.active = ViewResource
+	// Also drop any modal stacked on the previous view — logs/diagnose
+	// were bound to the prior kind's selection, so they're meaningless
+	// here.
+	m.logsCh, m.logsDone, m.diagnoseEventsCh = nil, nil, nil
+	if m.diagnoseSession != nil {
+		m.diagnoseSession.Cancel()
+		m.diagnoseSession = nil
+	}
+	return m, waitForResource(ch, done, p.Key)
+}
+
+// switchToPods returns to the (always-running) pod view. The pod
+// informer never stops, so no Switch call is needed — just flip
+// active back. Any resource-view state is left intact so re-entering
+// the previous :<kind> is instant.
+func (m Model) switchToPods() (Model, tea.Cmd) {
+	m.active = ViewPods
+	return m, nil
+}
+
+// closeResource is the `esc` handler on ViewResource. We don't stop
+// the per-kind informer here (cheap to keep running for next time);
+// future M9 polish can add a stop-on-close protocol if memory grows.
+func (m Model) closeResource() (Model, tea.Cmd) {
+	m.active = ViewPods
 	return m, nil
 }
 
@@ -354,6 +477,12 @@ func (m Model) handleNamespaceChange(namespace string) (Model, tea.Cmd) {
 		m.logsCh = nil
 		m.logsDone = nil
 		m.diagnoseEventsCh = nil
+		// Drop any resource view too — it was scoped to the prior
+		// namespace. User can re-enter via `:<kind>`.
+		m.resourceView = nil
+		m.resourceCh = nil
+		m.resourceDone = nil
+		m.resourceKind = ""
 	}
 	return m, waitForPods(ch, done)
 }
@@ -368,6 +497,10 @@ func (m Model) View() string {
 		content = m.logsView.View()
 	case ViewDiagnose:
 		content = m.diagnoseView.View()
+	case ViewResource:
+		if m.resourceView != nil {
+			content = m.resourceView.View()
+		}
 	default:
 		content = m.podView.View()
 	}
@@ -395,6 +528,8 @@ func (m Model) helpForView() string {
 		return "esc back · " + followKey + " · q quit · ? AI"
 	case ViewDiagnose:
 		return "esc dismiss · q quit"
+	case ViewResource:
+		return "esc back · q quit · : cmd"
 	default:
 		return "l logs · ? AI · q quit · : cmd"
 	}
@@ -488,6 +623,27 @@ func waitForLogs(ch <-chan []string, done <-chan struct{}) tea.Cmd {
 			return LogsBatchMsg{Lines: lines}
 		case <-done:
 			return LogsEndMsg{}
+		}
+	}
+}
+
+// waitForResource pumps one snapshot from the active resource kind's
+// channel into a ResourceSnapshotMsg. Mirrors waitForPods semantics
+// (channel-close and done-close both end the stream), with the
+// addition of Kind so Update can drop stale snapshots after a switch.
+func waitForResource(ch <-chan []runtime.Object, done <-chan struct{}, kind string) tea.Cmd {
+	return func() tea.Msg {
+		if ch == nil {
+			return nil
+		}
+		select {
+		case objs, ok := <-ch:
+			if !ok {
+				return ResourceStreamEndMsg{Kind: kind}
+			}
+			return ResourceSnapshotMsg{Kind: kind, Objects: objs}
+		case <-done:
+			return ResourceStreamEndMsg{Kind: kind}
 		}
 	}
 }
