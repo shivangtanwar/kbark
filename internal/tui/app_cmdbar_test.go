@@ -6,12 +6,17 @@ import (
 	"context"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/shivangtanwar/kbark/internal/describe"
 	"github.com/shivangtanwar/kbark/internal/kube"
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
 	"github.com/shivangtanwar/kbark/internal/tui/components"
 	"github.com/shivangtanwar/kbark/internal/tui/theme"
+	"github.com/shivangtanwar/kbark/internal/tui/views"
 )
 
 // modelWithRegistry returns a Model wired with the kind registry and
@@ -93,6 +98,50 @@ func TestSubmitCmd_unknownKeySetsError(t *testing.T) {
 	}
 	if next.resourceKind != "" {
 		t.Errorf("after :bogus, resourceKind = %q, want empty", next.resourceKind)
+	}
+}
+
+// TestOpenDescribeForResource_routesToDescribeView pins the M2.5b
+// flip — Enter on a non-pod resource view must open the describe
+// modal, set prevActive=ViewResource (so esc returns to the resource
+// list), and seed the YAML buffer off the cached object.
+func TestOpenDescribeForResource_routesToDescribeView(t *testing.T) {
+	m := modelWithRegistry(t)
+	m.describeService = describe.NewService(nil)
+	m.describeView = views.NewDescribeView(theme.Default())
+
+	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"}}
+	rv := views.NewTableResourceView(theme.Default(), kinds.Deployments())
+	m.resourceView = rv.SetSize(120, 24).SetObjects([]runtime.Object{dep})
+	m.resourceKind = "dep"
+	m.active = ViewResource
+
+	next, _ := m.openDescribeForResource()
+	if next.active != ViewDescribe {
+		t.Errorf("active = %v, want ViewDescribe", next.active)
+	}
+	if next.prevActive != ViewResource {
+		t.Errorf("prevActive = %v, want ViewResource (so esc returns to :dep)", next.prevActive)
+	}
+}
+
+// TestOpenDescribeForResource_emptyViewIsNoop guards against a panic
+// when Enter is pressed before the resource view has any rows.
+func TestOpenDescribeForResource_emptyViewIsNoop(t *testing.T) {
+	m := modelWithRegistry(t)
+	m.describeService = describe.NewService(nil)
+	m.describeView = views.NewDescribeView(theme.Default())
+	rv := views.NewTableResourceView(theme.Default(), kinds.Deployments())
+	m.resourceView = rv.SetSize(120, 24).SetObjects(nil)
+	m.resourceKind = "dep"
+	m.active = ViewResource
+
+	next, cmd := m.openDescribeForResource()
+	if next.active != ViewResource {
+		t.Errorf("empty Enter should leave active=ViewResource, got %v", next.active)
+	}
+	if cmd != nil {
+		t.Errorf("empty Enter should return nil Cmd, got %v", cmd)
 	}
 }
 

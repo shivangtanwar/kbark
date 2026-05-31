@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/shivangtanwar/kbark/internal/tui/theme"
 	"github.com/shivangtanwar/kbark/internal/tui/views"
 )
@@ -70,6 +72,27 @@ func TestDescribeView_errorFallbackHintsYAMLToggle(t *testing.T) {
 	v = v.ToggleMode()
 	if !strings.Contains(v.View(), "kind: Pod") {
 		t.Errorf("YAML still reachable after describe error: view:\n%s", v.View())
+	}
+}
+
+// TestDescribeView_setDescribeWrapsToWidth pins the regression: long
+// describe lines (Image IDs with SHAs, long container commands) must
+// wrap to viewport width rather than overflow the right edge. Mirrors
+// the DiagnoseView wrap fix.
+//
+// Width is set wide enough to fit the fixed status line ("— describe
+// · y toggle yaml/describe · esc back —", ~48 cells); the test still
+// verifies the long describe content wraps within that width.
+func TestDescribeView_setDescribeWrapsToWidth(t *testing.T) {
+	const width = 60
+	v := views.NewDescribeView(theme.Default())
+	v = v.SetSize(width, 24).
+		SetDescribe(strings.Repeat("the quick brown fox jumps over the lazy dog ", 6))
+
+	for _, line := range strings.Split(v.View(), "\n") {
+		if w := lipgloss.Width(line); w > width {
+			t.Errorf("line exceeds width %d: visible=%d line=%q", width, w, line)
+		}
 	}
 }
 

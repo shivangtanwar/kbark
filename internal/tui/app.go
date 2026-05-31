@@ -13,6 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
@@ -311,8 +312,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case ViewResource:
-		if msg.String() == "esc" {
+		switch msg.String() {
+		case "esc":
 			return m.closeResource()
+		case "enter":
+			return m.openDescribeForResource()
 		}
 		var cmd tea.Cmd
 		m.resourceView, cmd = m.resourceView.Update(msg)
@@ -487,34 +491,64 @@ func (m Model) closeResource() (Model, tea.Cmd) {
 	return m, nil
 }
 
-// openDescribeForPod is the Enter handler on ViewPods. Fills the
-// modal with YAML synchronously (off the cached object) and fires a
-// Cmd that streams in the kubectl/describe text. Esc on the modal
-// returns to the pod view.
+// openDescribeForPod is the Enter handler on ViewPods.
 func (m Model) openDescribeForPod() (Model, tea.Cmd) {
 	pod := m.podView.SelectedPod()
 	if pod == nil {
 		return m, nil
 	}
-	plugin := kinds.Pods()
-	title := fmt.Sprintf("%s/%s · %s", pod.Namespace, pod.Name, plugin.Kind)
+	m.prevActive = ViewPods
+	return m.openDescribe(kinds.Pods(), pod, pod.Namespace, pod.Name)
+}
+
+// openDescribeForResource is the Enter handler on ViewResource.
+// Pulls the typed object from the active view, looks up its plugin
+// from the registry, and reuses the shared modal-open path.
+func (m Model) openDescribeForResource() (Model, tea.Cmd) {
+	if m.resourceView == nil || m.registry == nil {
+		return m, nil
+	}
+	obj := m.resourceView.SelectedObject()
+	if obj == nil {
+		return m, nil
+	}
+	plugin, ok := m.registry.Lookup(m.resourceKind)
+	if !ok {
+		return m, nil
+	}
+	accessor, err := meta.Accessor(obj)
+	if err != nil {
+		return m, nil
+	}
+	m.prevActive = ViewResource
+	return m.openDescribe(plugin, obj, accessor.GetNamespace(), accessor.GetName())
+}
+
+// openDescribe is the shared modal-open path. Both Enter handlers
+// converge here. Sets YAML synchronously off the cached object, kicks
+// off a Cmd to stream in the kubectl/describe text, and routes to
+// ViewDescribe. Cluster-scoped objects (empty namespace) get a
+// shortened title.
+func (m Model) openDescribe(plugin kinds.Plugin, obj runtime.Object, namespace, name string) (Model, tea.Cmd) {
+	title := fmt.Sprintf("%s/%s · %s", namespace, name, plugin.Kind)
+	if namespace == "" {
+		title = fmt.Sprintf("%s · %s", name, plugin.Kind)
+	}
 
 	m.describeView = m.describeView.Reset().SetTitle(title)
 	if m.describeService != nil {
-		yaml, err := m.describeService.YAML(pod, plugin)
-		if err == nil {
-			m.describeView = m.describeView.SetYAML(yaml)
+		if y, err := m.describeService.YAML(obj, plugin); err == nil {
+			m.describeView = m.describeView.SetYAML(y)
 		}
 	}
 	m.describeView = m.describeView.SetSize(m.width, m.contentHeight())
-	m.prevActive = ViewPods
 	m.active = ViewDescribe
 
 	if m.describeService == nil {
 		m.describeView = m.describeView.MarkError(errors.New("no REST config; describe unavailable"))
 		return m, nil
 	}
-	return m, fetchDescribe(m.ctx, m.describeService, plugin, pod.Namespace, pod.Name)
+	return m, fetchDescribe(m.ctx, m.describeService, plugin, namespace, name)
 }
 
 // closeDescribe returns to whichever view was active when Enter
