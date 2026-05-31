@@ -23,7 +23,7 @@ type Cmdbar struct {
 func NewCmdbar(th theme.Theme) Cmdbar {
 	ti := textinput.New()
 	ti.Prompt = ":"
-	ti.Placeholder = "ns <namespace> · po · dep · svc"
+	ti.Placeholder = "ns <namespace> · po dep svc cm sec ing"
 	ti.CharLimit = 80
 	return Cmdbar{input: ti, th: th}
 }
