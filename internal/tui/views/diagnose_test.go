@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/shivangtanwar/kbark/internal/tui/theme"
 	"github.com/shivangtanwar/kbark/internal/tui/views"
 )
@@ -72,5 +74,41 @@ func TestDiagnoseView_markErrorShowsErrorMessage(t *testing.T) {
 	}
 	if !strings.Contains(v.View(), "auth failed: 401") {
 		t.Errorf("Error state should surface the message, got:\n%s", v.View())
+	}
+}
+
+// TestDiagnoseView_appendTextWrapsToWidth pins the regression where the
+// AI prose ran off the right edge of the terminal — the viewport doesn't
+// soft-wrap by default, so long sentences must be wrapped before
+// SetContent. Visible width is measured via lipgloss.Width so styling
+// ANSI sequences don't get counted as columns.
+func TestDiagnoseView_appendTextWrapsToWidth(t *testing.T) {
+	const width = 40
+	v := views.NewDiagnoseView(theme.Default())
+	v = v.SetSize(width, 24)
+	v = v.AppendText(strings.Repeat("the quick brown fox jumps over the lazy dog ", 6))
+
+	for _, line := range strings.Split(v.View(), "\n") {
+		if w := lipgloss.Width(line); w > width {
+			t.Errorf("line exceeds width %d: visible=%d line=%q", width, w, line)
+		}
+	}
+}
+
+// TestDiagnoseView_setSizeRewrapsExistingText covers the resize path: a
+// viewport that started narrow and grew wider (or vice versa) must
+// re-wrap its existing buffer instead of leaving stale wrap points from
+// the previous width baked in.
+func TestDiagnoseView_setSizeRewrapsExistingText(t *testing.T) {
+	v := views.NewDiagnoseView(theme.Default())
+	v = v.SetSize(20, 24)
+	v = v.AppendText(strings.Repeat("alpha beta gamma delta ", 4))
+	const newWidth = 60
+	v = v.SetSize(newWidth, 24)
+
+	for _, line := range strings.Split(v.View(), "\n") {
+		if w := lipgloss.Width(line); w > newWidth {
+			t.Errorf("after resize, line exceeds width %d: visible=%d line=%q", newWidth, w, line)
+		}
 	}
 }

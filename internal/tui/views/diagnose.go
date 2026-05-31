@@ -69,6 +69,9 @@ func (v DiagnoseView) SetSize(width, height int) DiagnoseView {
 		inner = 0
 	}
 	v.vp.Height = inner
+	// Re-wrap on resize — width changed, the old SetContent buffer is now
+	// either too narrow (wasted space) or too wide (overflows the pane).
+	v.vp.SetContent(wrapToWidth(v.text, v.vp.Width))
 	return v
 }
 
@@ -86,7 +89,7 @@ func (v DiagnoseView) Reset() DiagnoseView {
 // behaviour while streaming).
 func (v DiagnoseView) AppendText(delta string) DiagnoseView {
 	v.text += delta
-	v.vp.SetContent(v.text)
+	v.vp.SetContent(wrapToWidth(v.text, v.vp.Width))
 	if v.state == DiagnoseStreaming {
 		v.vp.GotoBottom()
 	}
@@ -99,11 +102,23 @@ func (v DiagnoseView) AppendText(delta string) DiagnoseView {
 func (v DiagnoseView) AppendToolCall(name string) DiagnoseView {
 	line := "\n  ⚙ " + toolCallLabel(name) + "\n"
 	v.text += line
-	v.vp.SetContent(v.text)
+	v.vp.SetContent(wrapToWidth(v.text, v.vp.Width))
 	if v.state == DiagnoseStreaming {
 		v.vp.GotoBottom()
 	}
 	return v
+}
+
+// wrapToWidth soft-wraps text to fit the given column width while
+// preserving existing newlines. Returns the text unchanged when width is
+// non-positive (e.g. during the bubbletea init pass before SetSize fires)
+// so we don't munge content with a 0-width style that produces empty
+// output.
+func wrapToWidth(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
+	return lipgloss.NewStyle().Width(width).Render(text)
 }
 
 // toolCallLabel maps a tool name to a short human phrase. Unknown tools
