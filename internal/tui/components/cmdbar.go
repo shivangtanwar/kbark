@@ -23,13 +23,20 @@ type Cmdbar struct {
 func NewCmdbar(th theme.Theme) Cmdbar {
 	ti := textinput.New()
 	ti.Prompt = ":"
-	ti.Placeholder = "ns <namespace>"
+	ti.Placeholder = "ns <namespace> · po · dep · svc"
 	ti.CharLimit = 80
 	return Cmdbar{input: ti, th: th}
 }
 
 func (c Cmdbar) Active() bool  { return c.active }
 func (c Cmdbar) Value() string { return c.input.Value() }
+
+// SetValue replaces the current input. Primarily for tests; the cmdbar
+// otherwise drives itself off textinput updates.
+func (c Cmdbar) SetValue(v string) Cmdbar {
+	c.input.SetValue(v)
+	return c
+}
 
 func (c Cmdbar) Activate() Cmdbar {
 	c.active = true
