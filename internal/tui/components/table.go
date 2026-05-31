@@ -56,6 +56,17 @@ func (t Table) SelectedRow() table.Row {
 	return t.inner.SelectedRow()
 }
 
+// Cursor returns the index of the currently-selected row. Returns -1
+// when the table is empty. Used by views that hold a parallel typed
+// objects slice and need to look up the typed object behind the row
+// by index (independent of what the first column happens to show).
+func (t Table) Cursor() int {
+	if len(t.inner.Rows()) == 0 {
+		return -1
+	}
+	return t.inner.Cursor()
+}
+
 func (t Table) Update(msg tea.Msg) (Table, tea.Cmd) {
 	var cmd tea.Cmd
 	t.inner, cmd = t.inner.Update(msg)

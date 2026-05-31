@@ -5,7 +5,6 @@ package views
 import (
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
@@ -74,24 +73,15 @@ func (v TableResourceView) Update(msg tea.Msg) (ResourceView, tea.Cmd) {
 
 func (v TableResourceView) View() string { return v.table.View() }
 
-// SelectedObject matches by the row's first cell (name) — the Plugin
-// contract requires Row[0] to be the resource name for exactly this
-// reason. Returns nil if the table is empty or the lookup misses
-// (shouldn't happen, but doesn't panic if it does).
+// SelectedObject returns the typed object at the cursor's row index.
+// Indexes into the parallel objects slice, so the lookup is robust to
+// kinds whose first column isn't the resource name (e.g. events).
+// Returns nil if the table is empty or the cursor is somehow out of
+// range.
 func (v TableResourceView) SelectedObject() runtime.Object {
-	row := v.table.SelectedRow()
-	if len(row) == 0 || len(v.objects) == 0 {
+	idx := v.table.Cursor()
+	if idx < 0 || idx >= len(v.objects) {
 		return nil
 	}
-	name := row[0]
-	for _, o := range v.objects {
-		a, err := meta.Accessor(o)
-		if err != nil {
-			continue
-		}
-		if a.GetName() == name {
-			return o
-		}
-	}
-	return nil
+	return v.objects[idx]
 }

@@ -48,6 +48,12 @@ func (s *ResourceService) Kind() string { return s.plugin.Key }
 // `namespace`. Returns the snapshots channel, a done channel that closes
 // on the next Switch, and any startup error. Same contract as
 // PodService.Switch.
+//
+// Cluster-scoped plugins (Scope == kinds.Cluster) ignore the namespace
+// argument: their informer always watches cluster-wide. This means
+// `:no` always lists every node regardless of the user's active
+// namespace, and a subsequent `:ns kube-system` doesn't touch the
+// nodes informer.
 func (s *ResourceService) Switch(namespace string) (<-chan []runtime.Object, <-chan struct{}, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -59,6 +65,9 @@ func (s *ResourceService) Switch(namespace string) (<-chan []runtime.Object, <-c
 		s.done = nil
 	}
 
+	if s.plugin.Scope == kinds.Cluster {
+		namespace = ""
+	}
 	ctx, cancel := context.WithCancel(s.parent)
 	factory := NewFactory(s.client, namespace, s.resync)
 	lister, err := NewResourceLister(factory, s.plugin)
