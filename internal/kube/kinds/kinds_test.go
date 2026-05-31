@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,6 +54,19 @@ func TestPlugins_haveValidShape(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
 			Spec:       networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{{Host: "example.com"}}},
 		}},
+		{"statefulsets", kinds.StatefulSets(), "sts", &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		}},
+		{"daemonsets", kinds.DaemonSets(), "ds", &appsv1.DaemonSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		}},
+		{"jobs", kinds.Jobs(), "job", &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		}},
+		{"cronjobs", kinds.CronJobs(), "cj", &batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+			Spec:       batchv1.CronJobSpec{Schedule: "*/5 * * * *"},
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,6 +105,7 @@ func TestPlugins_rowSurvivesWrongType(t *testing.T) {
 	allPlugins := []kinds.Plugin{
 		kinds.Pods(), kinds.Deployments(), kinds.Services(),
 		kinds.ConfigMaps(), kinds.Secrets(), kinds.Ingresses(),
+		kinds.StatefulSets(), kinds.DaemonSets(), kinds.Jobs(), kinds.CronJobs(),
 	}
 	for _, p := range allPlugins {
 		row := p.Row(wrong)
