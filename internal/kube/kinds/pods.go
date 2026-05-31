@@ -22,6 +22,7 @@ func Pods() Plugin {
 	return Plugin{
 		Key:         "po",
 		DisplayName: "Pods",
+		Kind:        "Pod",
 		GVR:         corev1.SchemeGroupVersion.WithResource("pods"),
 		Columns: []table.Column{
 			{Title: "NAME", Width: 40},

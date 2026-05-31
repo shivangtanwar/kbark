@@ -18,6 +18,7 @@ func Deployments() Plugin {
 	return Plugin{
 		Key:         "dep",
 		DisplayName: "Deployments",
+		Kind:        "Deployment",
 		GVR:         appsv1.SchemeGroupVersion.WithResource("deployments"),
 		Columns: []table.Column{
 			{Title: "NAME", Width: 40},

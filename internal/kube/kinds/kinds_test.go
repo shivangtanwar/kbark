@@ -89,6 +89,12 @@ func TestPlugins_haveValidShape(t *testing.T) {
 			if tc.plugin.GVR.Empty() {
 				t.Error("GVR empty")
 			}
+			if tc.plugin.Kind == "" {
+				t.Error("Kind empty (needed for describe.Service GVK lookup)")
+			}
+			if tc.plugin.GVK().Empty() {
+				t.Error("GVK() empty (Kind missing or GVR.GroupVersion blank)")
+			}
 			if len(tc.plugin.Columns) == 0 {
 				t.Error("Columns empty")
 			}

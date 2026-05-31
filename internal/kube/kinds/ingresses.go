@@ -20,6 +20,7 @@ func Ingresses() Plugin {
 	return Plugin{
 		Key:         "ing",
 		DisplayName: "Ingresses",
+		Kind:        "Ingress",
 		GVR:         networkingv1.SchemeGroupVersion.WithResource("ingresses"),
 		Columns: []table.Column{
 			{Title: "NAME", Width: 30},

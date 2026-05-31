@@ -82,6 +82,20 @@ type DiagnosisErrorMsg struct {
 	Err error
 }
 
+// DescribeReadyMsg carries the kubectl-style describe text once
+// kubectl/describe has returned. The modal swaps "loading describe…"
+// for this text.
+type DescribeReadyMsg struct {
+	Text string
+}
+
+// DescribeErrorMsg fires when kubectl/describe fails (apiserver
+// hiccup, RBAC, missing kind). The modal stays open; the YAML view
+// remains usable.
+type DescribeErrorMsg struct {
+	Err error
+}
+
 // ErrMsg surfaces a non-fatal error (e.g. transient watch retry) to be
 // rendered in the footer status area without crashing the program.
 type ErrMsg struct {

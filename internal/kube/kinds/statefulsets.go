@@ -18,6 +18,7 @@ func StatefulSets() Plugin {
 	return Plugin{
 		Key:         "sts",
 		DisplayName: "StatefulSets",
+		Kind:        "StatefulSet",
 		GVR:         appsv1.SchemeGroupVersion.WithResource("statefulsets"),
 		Columns: []table.Column{
 			{Title: "NAME", Width: 40},
