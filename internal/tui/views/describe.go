@@ -79,8 +79,20 @@ func (v DescribeView) SetSize(width, height int) DescribeView {
 		inner = 0
 	}
 	v.vp.Height = inner
-	v.vp.SetContent(v.activeBuffer())
+	v.vp.SetContent(wrapBufferToWidth(v.activeBuffer(), v.vp.Width))
 	return v
+}
+
+// wrapBufferToWidth soft-wraps the modal buffer to fit the viewport
+// width. Same approach as DiagnoseView — viewport doesn't word-wrap
+// by default, so long describe lines (e.g. Image ID with a SHA) would
+// otherwise run off the right edge. Width<=0 returns unchanged so the
+// pre-SetSize render doesn't munge the buffer.
+func wrapBufferToWidth(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
+	return lipgloss.NewStyle().Width(width).Render(text)
 }
 
 // SetYAML stashes the YAML buffer. Called synchronously when the
@@ -88,7 +100,7 @@ func (v DescribeView) SetSize(width, height int) DescribeView {
 // is loading.
 func (v DescribeView) SetYAML(y string) DescribeView {
 	v.yaml = y
-	v.vp.SetContent(v.activeBuffer())
+	v.vp.SetContent(wrapBufferToWidth(v.activeBuffer(), v.vp.Width))
 	return v
 }
 
@@ -97,7 +109,7 @@ func (v DescribeView) SetYAML(y string) DescribeView {
 func (v DescribeView) SetDescribe(d string) DescribeView {
 	v.describe = d
 	v.describeWait = false
-	v.vp.SetContent(v.activeBuffer())
+	v.vp.SetContent(wrapBufferToWidth(v.activeBuffer(), v.vp.Width))
 	v.vp.GotoTop()
 	return v
 }
@@ -107,7 +119,7 @@ func (v DescribeView) SetDescribe(d string) DescribeView {
 func (v DescribeView) MarkError(err error) DescribeView {
 	v.err = err
 	v.describeWait = false
-	v.vp.SetContent(v.activeBuffer())
+	v.vp.SetContent(wrapBufferToWidth(v.activeBuffer(), v.vp.Width))
 	return v
 }
 
@@ -118,7 +130,7 @@ func (v DescribeView) ToggleMode() DescribeView {
 	} else {
 		v.mode = ModeDescribe
 	}
-	v.vp.SetContent(v.activeBuffer())
+	v.vp.SetContent(wrapBufferToWidth(v.activeBuffer(), v.vp.Width))
 	v.vp.GotoTop()
 	return v
 }
