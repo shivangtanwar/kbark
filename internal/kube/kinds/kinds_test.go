@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -38,6 +39,19 @@ func TestPlugins_haveValidShape(t *testing.T) {
 				Type: corev1.ServiceTypeClusterIP, ClusterIP: "10.0.0.1",
 				Ports: []corev1.ServicePort{{Port: 80, Protocol: "TCP"}},
 			},
+		}},
+		{"configmaps", kinds.ConfigMaps(), "cm", &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+			Data:       map[string]string{"a": "1", "b": "2"},
+		}},
+		{"secrets", kinds.Secrets(), "sec", &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{"token": []byte("x")},
+		}},
+		{"ingresses", kinds.Ingresses(), "ing", &networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+			Spec:       networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{{Host: "example.com"}}},
 		}},
 	}
 	for _, tc := range cases {
@@ -74,10 +88,37 @@ func TestPlugins_haveValidShape(t *testing.T) {
 // Columns even when handed an object of the wrong type.
 func TestPlugins_rowSurvivesWrongType(t *testing.T) {
 	wrong := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}
-	for _, p := range []kinds.Plugin{kinds.Pods(), kinds.Deployments(), kinds.Services()} {
+	allPlugins := []kinds.Plugin{
+		kinds.Pods(), kinds.Deployments(), kinds.Services(),
+		kinds.ConfigMaps(), kinds.Secrets(), kinds.Ingresses(),
+	}
+	for _, p := range allPlugins {
 		row := p.Row(wrong)
 		if len(row) != len(p.Columns) {
 			t.Errorf("%s: Row cells = %d, Columns = %d on wrong-type input", p.Key, len(row), len(p.Columns))
+		}
+	}
+}
+
+// TestSecrets_neverExposesValueContent is a defense-in-depth pin: even
+// if a future edit accidentally widens the Row mapper to surface
+// secret data, this test catches it before it ships. The full bytes
+// of any secret value must NOT appear anywhere in the rendered row.
+func TestSecrets_neverExposesValueContent(t *testing.T) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "alpha"},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"token":    []byte("super-secret-token-DO-NOT-LEAK"),
+			"password": []byte("hunter2"),
+		},
+	}
+	row := kinds.Secrets().Row(secret)
+	for _, cell := range row {
+		for _, leak := range []string{"super-secret-token-DO-NOT-LEAK", "hunter2"} {
+			if cell == leak {
+				t.Fatalf("secret value %q leaked into row cell %q", leak, cell)
+			}
 		}
 	}
 }
