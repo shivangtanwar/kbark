@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/shivangtanwar/kbark/internal/ai"
+	"github.com/shivangtanwar/kbark/internal/describe"
 	"github.com/shivangtanwar/kbark/internal/diagnose"
 	"github.com/shivangtanwar/kbark/internal/kube"
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
@@ -105,6 +106,11 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		resourceServices[key] = kube.NewResourceService(clientset, kube.DefaultResyncInterval, ctx, p)
 	}
 
+	// kubectl/describe via ConfigFlags as the RESTClientGetter.
+	// kubeFlags already implements the interface, so the modal lights
+	// up with no extra wiring.
+	describeService := describe.NewService(kubeFlags)
+
 	model := tui.NewModel(tui.ModelDeps{
 		Ctx:               ctx,
 		Flags:             kubeFlags,
@@ -117,6 +123,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		ToolDispatcher:    dispatcher,
 		AIProvider:        aiProvider,
 		AIModel:           defaultAIModel,
+		DescribeService:   describeService,
 		KindRegistry:      registry,
 		ResourceServices:  resourceServices,
 	})

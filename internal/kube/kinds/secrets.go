@@ -21,6 +21,7 @@ func Secrets() Plugin {
 	return Plugin{
 		Key:         "sec",
 		DisplayName: "Secrets",
+		Kind:        "Secret",
 		GVR:         corev1.SchemeGroupVersion.WithResource("secrets"),
 		Columns: []table.Column{
 			{Title: "NAME", Width: 40},

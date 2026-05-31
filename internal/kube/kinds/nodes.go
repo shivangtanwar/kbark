@@ -22,6 +22,7 @@ func Nodes() Plugin {
 	return Plugin{
 		Key:         "no",
 		DisplayName: "Nodes",
+		Kind:        "Node",
 		GVR:         corev1.SchemeGroupVersion.WithResource("nodes"),
 		Scope:       Cluster,
 		Columns: []table.Column{

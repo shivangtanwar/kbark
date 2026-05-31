@@ -18,6 +18,7 @@ func CronJobs() Plugin {
 	return Plugin{
 		Key:         "cj",
 		DisplayName: "CronJobs",
+		Kind:        "CronJob",
 		GVR:         batchv1.SchemeGroupVersion.WithResource("cronjobs"),
 		Columns: []table.Column{
 			{Title: "NAME", Width: 30},

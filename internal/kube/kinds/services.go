@@ -19,6 +19,7 @@ func Services() Plugin {
 	return Plugin{
 		Key:         "svc",
 		DisplayName: "Services",
+		Kind:        "Service",
 		GVR:         corev1.SchemeGroupVersion.WithResource("services"),
 		Columns: []table.Column{
 			{Title: "NAME", Width: 30},

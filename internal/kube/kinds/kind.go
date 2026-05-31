@@ -42,6 +42,10 @@ type Plugin struct {
 	Key string
 	// DisplayName is the human-facing label ("Deployments").
 	DisplayName string
+	// Kind is the canonical singular kind name ("Pod", "Deployment").
+	// Together with GVR.GroupVersion() it forms the GVK that
+	// kubectl/describe's DescriberFor expects.
+	Kind string
 	// GVR identifies the resource for informer/lister access.
 	GVR schema.GroupVersionResource
 	// Scope is Namespaced by default; set to Cluster for kinds like
@@ -57,6 +61,12 @@ type Plugin struct {
 	// (e.g. events lead with LAST SEEN rather than the synthetic
 	// event name).
 	Row func(runtime.Object) table.Row
+}
+
+// GVK returns the GroupVersionKind derived from GVR's GroupVersion +
+// Kind. Used by describe.Service to look up the right kubectl describer.
+func (p Plugin) GVK() schema.GroupVersionKind {
+	return p.GVR.GroupVersion().WithKind(p.Kind)
 }
 
 // Registry holds the plugins kbark was built with, indexed for cmdbar

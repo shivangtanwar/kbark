@@ -24,6 +24,7 @@ func Events() Plugin {
 	return Plugin{
 		Key:         "ev",
 		DisplayName: "Events",
+		Kind:        "Event",
 		GVR:         corev1.SchemeGroupVersion.WithResource("events"),
 		Columns: []table.Column{
 			{Title: "LAST SEEN", Width: 12},

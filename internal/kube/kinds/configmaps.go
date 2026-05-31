@@ -20,6 +20,7 @@ func ConfigMaps() Plugin {
 	return Plugin{
 		Key:         "cm",
 		DisplayName: "ConfigMaps",
+		Kind:        "ConfigMap",
 		GVR:         corev1.SchemeGroupVersion.WithResource("configmaps"),
 		Columns: []table.Column{
 			{Title: "NAME", Width: 40},

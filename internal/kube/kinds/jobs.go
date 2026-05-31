@@ -19,6 +19,7 @@ func Jobs() Plugin {
 	return Plugin{
 		Key:         "job",
 		DisplayName: "Jobs",
+		Kind:        "Job",
 		GVR:         batchv1.SchemeGroupVersion.WithResource("jobs"),
 		Columns: []table.Column{
 			{Title: "NAME", Width: 40},

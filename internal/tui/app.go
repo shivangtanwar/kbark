@@ -17,6 +17,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	"github.com/shivangtanwar/kbark/internal/ai"
+	"github.com/shivangtanwar/kbark/internal/describe"
 	"github.com/shivangtanwar/kbark/internal/diagnose"
 	"github.com/shivangtanwar/kbark/internal/kube"
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
@@ -39,6 +40,10 @@ const (
 	// on their own ViewPods slot in M2.1 so the diagnose `?` flow's
 	// typed *corev1.Pod access remains untouched.
 	ViewResource
+	// ViewDescribe is the Enter-key modal: kubectl-style describe text
+	// + a `y`-toggle to raw YAML. Stacks over whichever resource view
+	// was active so esc returns there.
+	ViewDescribe
 )
 
 // ModelDeps bundles everything the root Model needs at construction time.
@@ -55,6 +60,10 @@ type ModelDeps struct {
 	ToolDispatcher    *diagnose.Dispatcher
 	AIProvider        ai.Provider
 	AIModel           string
+	// DescribeService powers the Enter-key modal. May be nil if no
+	// REST config could be built at startup; the modal then surfaces
+	// YAML only and shows an actionable error for the describe text.
+	DescribeService *describe.Service
 	// KindRegistry lists every non-pod resource kind known to the
 	// cmdbar. Pods stay on the legacy typed PodService path.
 	KindRegistry *kinds.Registry
@@ -78,17 +87,20 @@ type Model struct {
 	namespace   string
 
 	active       ActiveView
+	prevActive   ActiveView
 	podView      views.PodView
 	logsView     views.LogsView
 	diagnoseView views.DiagnoseView
+	describeView views.DescribeView
 	cmdbar       components.Cmdbar
 
-	podService     *kube.PodService
-	logService     *kube.LogService
-	podContextBldr *diagnose.PodContextBuilder
-	toolDispatcher *diagnose.Dispatcher
-	aiProvider     ai.Provider
-	aiModel        string
+	podService      *kube.PodService
+	logService      *kube.LogService
+	podContextBldr  *diagnose.PodContextBuilder
+	toolDispatcher  *diagnose.Dispatcher
+	aiProvider      ai.Provider
+	aiModel         string
+	describeService *describe.Service
 
 	podsCh           <-chan []*corev1.Pod
 	podsDone         <-chan struct{}
@@ -127,6 +139,7 @@ func NewModel(deps ModelDeps) Model {
 		podView:          views.NewPodView(th),
 		logsView:         views.NewLogsView(th),
 		diagnoseView:     views.NewDiagnoseView(th),
+		describeView:     views.NewDescribeView(th),
 		cmdbar:           components.NewCmdbar(th),
 		podService:       deps.PodService,
 		logService:       deps.LogService,
@@ -134,6 +147,7 @@ func NewModel(deps ModelDeps) Model {
 		toolDispatcher:   deps.ToolDispatcher,
 		aiProvider:       deps.AIProvider,
 		aiModel:          deps.AIModel,
+		describeService:  deps.DescribeService,
 		podsCh:           deps.PodsCh,
 		podsDone:         deps.PodsDone,
 		registry:         deps.KindRegistry,
@@ -159,6 +173,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.podView = m.podView.SetSize(m.width, m.contentHeight())
 		m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
 		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+		m.describeView = m.describeView.SetSize(m.width, m.contentHeight())
 		if m.resourceView != nil {
 			m.resourceView = m.resourceView.SetSize(m.width, m.contentHeight())
 		}
@@ -224,6 +239,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resourceDone = nil
 		}
 		return m, nil
+
+	case DescribeReadyMsg:
+		m.describeView = m.describeView.SetDescribe(msg.Text)
+		return m, nil
+
+	case DescribeErrorMsg:
+		m.describeView = m.describeView.MarkError(msg.Err)
+		return m, nil
 	}
 	return m, nil
 }
@@ -260,6 +283,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.openLogs()
 		case "?":
 			return m.openDiagnose()
+		case "enter":
+			return m.openDescribeForPod()
 		}
 		var cmd tea.Cmd
 		m.podView, cmd = m.podView.Update(msg)
@@ -291,6 +316,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.resourceView, cmd = m.resourceView.Update(msg)
+		return m, cmd
+
+	case ViewDescribe:
+		switch msg.String() {
+		case "esc":
+			return m.closeDescribe()
+		case "y":
+			m.describeView = m.describeView.ToggleMode()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.describeView, cmd = m.describeView.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -362,6 +399,7 @@ func (m *Model) resizeAll() {
 	m.podView = m.podView.SetSize(m.width, m.contentHeight())
 	m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
 	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+	m.describeView = m.describeView.SetSize(m.width, m.contentHeight())
 	if m.resourceView != nil {
 		m.resourceView = m.resourceView.SetSize(m.width, m.contentHeight())
 	}
@@ -449,6 +487,62 @@ func (m Model) closeResource() (Model, tea.Cmd) {
 	return m, nil
 }
 
+// openDescribeForPod is the Enter handler on ViewPods. Fills the
+// modal with YAML synchronously (off the cached object) and fires a
+// Cmd that streams in the kubectl/describe text. Esc on the modal
+// returns to the pod view.
+func (m Model) openDescribeForPod() (Model, tea.Cmd) {
+	pod := m.podView.SelectedPod()
+	if pod == nil {
+		return m, nil
+	}
+	plugin := kinds.Pods()
+	title := fmt.Sprintf("%s/%s · %s", pod.Namespace, pod.Name, plugin.Kind)
+
+	m.describeView = m.describeView.Reset().SetTitle(title)
+	if m.describeService != nil {
+		yaml, err := m.describeService.YAML(pod, plugin)
+		if err == nil {
+			m.describeView = m.describeView.SetYAML(yaml)
+		}
+	}
+	m.describeView = m.describeView.SetSize(m.width, m.contentHeight())
+	m.prevActive = ViewPods
+	m.active = ViewDescribe
+
+	if m.describeService == nil {
+		m.describeView = m.describeView.MarkError(errors.New("no REST config; describe unavailable"))
+		return m, nil
+	}
+	return m, fetchDescribe(m.ctx, m.describeService, plugin, pod.Namespace, pod.Name)
+}
+
+// closeDescribe returns to whichever view was active when Enter
+// opened the modal. The previous view's state (selection, snapshot
+// pump) wasn't touched, so it picks up where it left off.
+func (m Model) closeDescribe() (Model, tea.Cmd) {
+	m.active = m.prevActive
+	if m.active != ViewPods && m.active != ViewResource {
+		// Defensive — should not happen, but if prevActive somehow
+		// points at a modal view (e.g. tests construct a Model
+		// directly), land on pods rather than infinite-loop.
+		m.active = ViewPods
+	}
+	return m, nil
+}
+
+// fetchDescribe runs describe.Service.Describe off the bubbletea
+// main loop and produces a DescribeReadyMsg / DescribeErrorMsg.
+func fetchDescribe(ctx context.Context, svc *describe.Service, plugin kinds.Plugin, namespace, name string) tea.Cmd {
+	return func() tea.Msg {
+		text, err := svc.Describe(ctx, plugin, namespace, name)
+		if err != nil {
+			return DescribeErrorMsg{Err: err}
+		}
+		return DescribeReadyMsg{Text: text}
+	}
+}
+
 func (m Model) handleNamespaceChange(namespace string) (Model, tea.Cmd) {
 	if m.podService == nil {
 		m.namespace = namespace
@@ -501,6 +595,8 @@ func (m Model) View() string {
 		if m.resourceView != nil {
 			content = m.resourceView.View()
 		}
+	case ViewDescribe:
+		content = m.describeView.View()
 	default:
 		content = m.podView.View()
 	}
@@ -530,8 +626,10 @@ func (m Model) helpForView() string {
 		return "esc dismiss · q quit"
 	case ViewResource:
 		return "esc back · q quit · : cmd"
+	case ViewDescribe:
+		return "y toggle · esc back · q quit"
 	default:
-		return "l logs · ? AI · q quit · : cmd"
+		return "l logs · ↵ describe · ? AI · q quit · : cmd"
 	}
 }
 

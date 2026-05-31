@@ -19,6 +19,7 @@ func DaemonSets() Plugin {
 	return Plugin{
 		Key:         "ds",
 		DisplayName: "DaemonSets",
+		Kind:        "DaemonSet",
 		GVR:         appsv1.SchemeGroupVersion.WithResource("daemonsets"),
 		Columns: []table.Column{
 			{Title: "NAME", Width: 30},
