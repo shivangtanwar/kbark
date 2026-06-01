@@ -43,11 +43,41 @@ type Result struct {
 	Detail string
 }
 
-// Run executes every check in a fixed order: kubeconfig, apiserver, then each
-// AI provider. Provider checks always run so users see their full posture,
-// even when the cluster checks are red.
-func Run(ctx context.Context, kubeFlags *genericclioptions.ConfigFlags) []Result {
-	results := make([]Result, 0, 5)
+// Options carries profile-resolution state into Run so the doctor
+// output can show which config file was loaded, which profile is
+// active, and which provider row corresponds to the active one.
+// All fields are optional; zero-value behaves like the pre-M8.2
+// doctor that knew nothing about config.
+type Options struct {
+	// ConfigPath is the resolved on-disk config file path (whether
+	// or not it exists). Empty if UserConfigDir() failed.
+	ConfigPath string
+	// ConfigLoaded reports whether the config file actually existed
+	// and parsed successfully. False means built-in defaults are in
+	// use — not an error condition.
+	ConfigLoaded bool
+	// Profile is the resolved active profile name.
+	Profile string
+	// Provider is the AI provider name dictated by the active
+	// profile ("anthropic" / "openai" / "ollama").
+	Provider string
+	// Model is the provider-specific model identifier.
+	Model string
+	// ProfileErr, when non-nil, indicates the --profile flag pointed
+	// at an unknown name or the config file was malformed. The
+	// doctor surfaces this as a RED "profile" row but continues
+	// with the other checks so the user can still see kubeconfig
+	// state.
+	ProfileErr error
+}
+
+// Run executes every check in a fixed order: config, profile,
+// kubeconfig, apiserver, then each AI provider. Provider checks
+// always run so users see their full posture, even when the cluster
+// checks or profile resolution failed.
+func Run(ctx context.Context, kubeFlags *genericclioptions.ConfigFlags, opts Options) []Result {
+	results := make([]Result, 0, 8)
+	results = append(results, checkConfig(opts)...)
 
 	kubeRes, restCfg := checkKubeconfig(kubeFlags)
 	results = append(results, kubeRes)
@@ -64,9 +94,9 @@ func Run(ctx context.Context, kubeFlags *genericclioptions.ConfigFlags) []Result
 
 	results = append(
 		results,
-		checkAnthropic(ctx),
-		checkOpenAI(ctx),
-		checkOllama(ctx),
+		markActive(checkAnthropic(ctx), opts),
+		markActive(checkOpenAI(ctx), opts),
+		markActive(checkOllama(ctx), opts),
 	)
 	return results
 }

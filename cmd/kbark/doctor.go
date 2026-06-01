@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/shivangtanwar/kbark/internal/config"
 	"github.com/shivangtanwar/kbark/internal/doctor"
 )
 
@@ -29,13 +30,49 @@ AI provider failures are reported but do not fail the command.`,
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
-		results := doctor.Run(ctx, kubeFlags)
+		results := doctor.Run(ctx, kubeFlags, buildDoctorOptions())
 		renderResults(os.Stdout, results)
 		if doctor.ClusterFatal(results) {
 			os.Exit(1)
 		}
 		return nil
 	},
+}
+
+// buildDoctorOptions resolves the config + profile state for the
+// doctor command. Failures (missing UserConfigDir, unknown profile)
+// are surfaced via doctor.Options.ProfileErr rather than aborting
+// the command — the doctor's job is to TELL the user what's broken,
+// not exit before showing the kube state.
+func buildDoctorOptions() doctor.Options {
+	opts := doctor.Options{}
+	cfgPath, _ := config.DefaultPath()
+	opts.ConfigPath = cfgPath
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		opts.ProfileErr = err
+		return opts
+	}
+	// Distinguish "file existed and loaded" from "fell back to defaults".
+	if cfgPath != "" {
+		if _, statErr := os.Stat(cfgPath); statErr == nil {
+			opts.ConfigLoaded = true
+		}
+	}
+
+	profile, err := cfg.Resolve(profileFlag)
+	if err != nil {
+		opts.ProfileErr = err
+		return opts
+	}
+	opts.Profile = profileFlag
+	if opts.Profile == "" {
+		opts.Profile = cfg.DefaultProfile
+	}
+	opts.Provider = profile.Provider
+	opts.Model = profile.Model
+	return opts
 }
 
 func init() {
