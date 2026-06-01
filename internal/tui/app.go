@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -47,6 +48,9 @@ const (
 	// + a `y`-toggle to raw YAML. Stacks over the resource view so
 	// esc returns there.
 	ViewDescribe
+	// ViewHelp is the cheat-sheet modal opened by `:help` in the
+	// cmdbar. Esc returns to the prior view.
+	ViewHelp
 )
 
 // ModelDeps bundles everything the root Model needs at construction time.
@@ -110,6 +114,8 @@ type Model struct {
 	logsView       views.LogsView
 	diagnoseView   views.DiagnoseView
 	describeView   views.DescribeView
+	helpView       views.HelpView
+	helpPrevActive ActiveView
 	cmdbar         components.Cmdbar
 
 	logService          *kube.LogService
@@ -168,6 +174,7 @@ func NewModel(deps ModelDeps) Model {
 		logsView:            views.NewLogsView(th),
 		diagnoseView:        views.NewDiagnoseView(th),
 		describeView:        views.NewDescribeView(th),
+		helpView:            views.NewHelpView(th),
 		cmdbar:              components.NewCmdbar(th),
 		logService:          deps.LogService,
 		podContextBldr:      deps.PodContextBuilder,
@@ -220,6 +227,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
 		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
 		m.describeView = m.describeView.SetSize(m.width, m.contentHeight())
+		m.helpView = m.helpView.SetSize(m.width, m.contentHeight())
 		if m.resourceView != nil {
 			m.resourceView = m.resourceView.SetSize(m.width, m.contentHeight())
 		}
@@ -392,6 +400,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.describeView, cmd = m.describeView.Update(msg)
 		return m, cmd
+
+	case ViewHelp:
+		if msg.String() == "esc" {
+			return m.closeHelp()
+		}
+		var cmd tea.Cmd
+		m.helpView, cmd = m.helpView.Update(msg)
+		return m, cmd
 	}
 	return m, nil
 }
@@ -551,6 +567,7 @@ func (m *Model) resizeAll() {
 	m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
 	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
 	m.describeView = m.describeView.SetSize(m.width, m.contentHeight())
+	m.helpView = m.helpView.SetSize(m.width, m.contentHeight())
 	if m.resourceView != nil {
 		m.resourceView = m.resourceView.SetSize(m.width, m.contentHeight())
 	}
@@ -567,6 +584,11 @@ func (m Model) submitCmd() (Model, tea.Cmd) {
 	}
 	if len(parts) == 2 && parts[0] == "profile" {
 		return m.switchProfile(parts[1])
+	}
+	if len(parts) == 1 && parts[0] == "help" {
+		m.cmdbar = m.cmdbar.Deactivate()
+		m.resizeAll()
+		return m.openHelp()
 	}
 	if len(parts) == 1 {
 		key := parts[0]
@@ -630,6 +652,79 @@ func (m Model) switchToHome() (Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.switchToResource(p)
+}
+
+// openHelp pops up the cheat-sheet modal. Esc returns to whatever
+// view was active before help was opened.
+func (m Model) openHelp() (Model, tea.Cmd) {
+	m.helpPrevActive = m.active
+	m.helpView = m.helpView.SetContent(m.buildHelpContent())
+	m.helpView = m.helpView.SetSize(m.width, m.contentHeight())
+	m.active = ViewHelp
+	return m, nil
+}
+
+func (m Model) closeHelp() (Model, tea.Cmd) {
+	m.active = m.helpPrevActive
+	return m, nil
+}
+
+// buildHelpContent renders the cheat-sheet text using the model's
+// runtime state — active profile, configured profiles, transcript
+// dir — so the user sees what kbark is actually configured with,
+// not a generic snapshot.
+func (m Model) buildHelpContent() string {
+	var b strings.Builder
+	b.WriteString("kbark · key bindings\n\n")
+	b.WriteString("  Resource view\n")
+	b.WriteString("    ↑/↓ · j/k     move cursor\n")
+	b.WriteString("    g · G         jump to top · bottom (logs view)\n")
+	b.WriteString("    Enter         describe modal (y toggles YAML)\n")
+	b.WriteString("    l             logs (pod view only)\n")
+	b.WriteString("    ?             AI diagnosis on the selected row\n")
+	b.WriteString("    esc           back to home view\n\n")
+	b.WriteString("  Logs view\n")
+	b.WriteString("    f             toggle follow (live tail / paused)\n")
+	b.WriteString("    j/k           move line cursor\n")
+	b.WriteString("    ?             AI diagnosis on the focal log line\n")
+	b.WriteString("    esc           back to resource view\n\n")
+	b.WriteString("  Diagnose · Describe · Help modals\n")
+	b.WriteString("    esc           dismiss\n")
+	b.WriteString("    y             (describe) toggle yaml/describe\n\n")
+	b.WriteString("  Global\n")
+	b.WriteString("    :             open cmdbar\n")
+	b.WriteString("    q             quit\n\n")
+	b.WriteString("kbark · cmdbar commands\n\n")
+	b.WriteString("    ns <ns>            switch namespace\n")
+	b.WriteString("    profile <name>     switch profile (provider, model, budget)\n")
+	b.WriteString("    help               show this screen\n")
+	b.WriteString("    po dep svc cm sec ing sts ds job cj ev no\n")
+	b.WriteString("                       switch resource kind\n\n")
+	b.WriteString("kbark · runtime\n\n")
+	b.WriteString("    Active profile:  " + m.profile + "\n")
+	if m.cfg != nil {
+		b.WriteString("    Configured profiles:\n")
+		for _, name := range sortedKeys(m.cfg.Profiles) {
+			p := m.cfg.Profiles[name]
+			marker := "    "
+			if name == m.profile {
+				marker = "  → "
+			}
+			b.WriteString(marker + name + " · " + p.Provider + " " + p.Model + "\n")
+		}
+	}
+	b.WriteString("    Transcripts:     ~/.cache/kbark/diagnoses/\n")
+	b.WriteString("                     (disable with KBARK_TRANSCRIPTS=off)\n\n")
+	return b.String()
+}
+
+func sortedKeys(m map[string]config.Profile) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // switchProfile resolves the named profile against the loaded config
@@ -828,6 +923,8 @@ func (m Model) View() string {
 		content = m.diagnoseView.View()
 	case ViewDescribe:
 		content = m.describeView.View()
+	case ViewHelp:
+		content = m.helpView.View()
 	default:
 		if m.resourceView != nil {
 			content = m.resourceView.View()
@@ -859,6 +956,8 @@ func (m Model) helpForView() string {
 		return "esc dismiss · q quit"
 	case ViewDescribe:
 		return "y toggle · esc back · q quit"
+	case ViewHelp:
+		return "esc back · q quit"
 	case ViewResource:
 		if m.resourceKind == "po" {
 			return "l logs · ↵ describe · ? AI · q quit · : cmd"
