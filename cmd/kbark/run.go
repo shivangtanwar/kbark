@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/shivangtanwar/kbark/internal/ai"
+	"github.com/shivangtanwar/kbark/internal/config"
 	"github.com/shivangtanwar/kbark/internal/describe"
 	"github.com/shivangtanwar/kbark/internal/diagnose"
 	"github.com/shivangtanwar/kbark/internal/kube"
@@ -23,28 +24,48 @@ import (
 
 var profileFlag string
 
-const defaultAIModel = "claude-sonnet-4-6"
-
 func init() {
 	rootCmd.PersistentFlags().StringVar(
 		&profileFlag,
 		"profile",
 		defaultProfile(),
-		"Configuration profile (dev/staging/prod)",
+		"Configuration profile name (loaded from ~/.config/kbark/config.yaml; built-in default: dev)",
 	)
 	rootCmd.RunE = runTUI
 }
 
+// defaultProfile picks the initial value for --profile. KBARK_PROFILE
+// env takes precedence so users can switch profiles without touching
+// shell history; the empty default falls through to config.Load's
+// DefaultProfile lookup at runtime.
 func defaultProfile() string {
 	if v := os.Getenv("KBARK_PROFILE"); v != "" {
 		return v
 	}
-	return "dev"
+	return ""
 }
 
 func runTUI(_ *cobra.Command, _ []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// Resolve the active profile. A missing config file falls back to
+	// built-in defaults (dev → anthropic + claude-sonnet); an unknown
+	// --profile value errors out with the list of valid names so the
+	// user can correct their invocation.
+	cfgPath, _ := config.DefaultPath()
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	profile, err := cfg.Resolve(profileFlag)
+	if err != nil {
+		return err
+	}
+	activeProfileName := profileFlag
+	if activeProfileName == "" {
+		activeProfileName = cfg.DefaultProfile
+	}
 
 	clientset, err := kube.NewClientset(kubeFlags)
 	if err != nil {
@@ -69,11 +90,11 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	}
 	dispatcher := diagnose.NewDispatcher(clientset, dynClient)
 
-	// AI is optional. If the env isn't set we let the TUI start and
-	// surface the configuration error inside the diagnose modal when the
-	// user actually presses `?`.
+	// AI provider is dictated by the active profile. If credentials
+	// aren't set for that provider we let the TUI start and surface
+	// the configuration error inside the diagnose modal on first `?`.
 	var aiProvider ai.Provider
-	if p, err := ai.New("anthropic"); err == nil {
+	if p, err := ai.New(profile.Provider); err == nil {
 		aiProvider = p
 	}
 
@@ -120,14 +141,14 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	model := tui.NewModel(tui.ModelDeps{
 		Ctx:                    ctx,
 		Flags:                  kubeFlags,
-		Profile:                profileFlag,
+		Profile:                activeProfileName,
 		LogService:             logService,
 		PodContextBuilder:      podContextBuilder,
 		LogContextBuilder:      logContextBuilder,
 		ResourceContextBuilder: resourceContextBuilder,
 		ToolDispatcher:         dispatcher,
 		AIProvider:             aiProvider,
-		AIModel:                defaultAIModel,
+		AIModel:                profile.Model,
 		DescribeService:        describeService,
 		KindRegistry:           registry,
 		ResourceServices:       resourceServices,
