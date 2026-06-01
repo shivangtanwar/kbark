@@ -55,10 +55,25 @@ kubectl run with-config --image=busybox --command -- sleep infinity
 ## Test conventions
 
 - Unit tests live next to the code they test (`foo.go` ↔ `foo_test.go`).
-- Use `kubernetes/fake` for kube-layer tests. envtest support for full E2E coverage is planned.
+- Use `kubernetes/fake` for kube-layer unit tests. For semantics fakes can't model (real watch / list-then-watch, RBAC, admission), use the envtest suite — see below.
 - Pin behaviour with **why-it-matters comments** at the top of each test, not just what it asserts. Tests that document the *contract* age better than tests that document the *implementation*.
 - Prefer substring assertions (`strings.Contains`) over full-output golden files — they survive prompt edits, theme tweaks, and other cosmetic changes.
 - Security-sensitive paths (`internal/redact/`, `internal/diagnose/tools.go`, `internal/describe/service.go`) should have a test for both the no-leak contract and the no-false-positive baseline. See `internal/redact/redact_test.go` for the pattern.
+
+### envtest E2E
+
+One end-to-end test runs against a real (in-memory) Kubernetes apiserver via controller-runtime's `envtest`. Gated behind the `envtest` build tag so `task test` doesn't fail on machines without the apiserver / etcd binaries.
+
+Local setup (once):
+
+```sh
+task envtest-setup        # downloads apiserver + etcd into ./.envtest-bins
+task envtest              # go test -tags=envtest ./internal/kube/...
+```
+
+CI runs this on ubuntu-latest only — controller-runtime's envtest binaries publish for linux + darwin, and one OS gives equivalent coverage. The suite must complete in CI under 90s; locally it's ~5s.
+
+Add new envtest cases sparingly — they're slower than unit tests and require external binaries. Bar for adding one: *fake clientsets can't model the behaviour you're testing.*
 
 ## Style
 
