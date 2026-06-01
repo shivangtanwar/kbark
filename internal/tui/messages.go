@@ -41,6 +41,26 @@ type ResourceStreamEndMsg struct {
 	Kind string
 }
 
+// HomeReadyMsg fires when the initial home-kind informer Switch
+// completes successfully. Bubbletea paints the empty resource view
+// immediately on first frame; this message wires up the snapshot
+// pump once cache sync finishes.
+type HomeReadyMsg struct {
+	Kind string
+	Ch   <-chan []runtime.Object
+	Done <-chan struct{}
+}
+
+// HomeFailedMsg fires when the initial home-kind informer Switch
+// errors (apiserver unreachable, RBAC, etc.). Surfaced as an inline
+// cmdbar error rather than aborting the program — the TUI still
+// works (logs and other kinds may still be reachable depending on
+// the failure mode).
+type HomeFailedMsg struct {
+	Kind string
+	Err  error
+}
+
 // DiagnosisStartedMsg carries the session handle once the context has
 // been built and the provider stream has opened. The Model stashes the
 // session so Esc can cancel it.
