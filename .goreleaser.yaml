@@ -98,7 +98,11 @@ homebrew_casks:
     repository:
       owner: shivangtanwar
       name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN | default .Env.GITHUB_TOKEN }}"
+      # The release workflow always exports HOMEBREW_TAP_GITHUB_TOKEN
+      # from the matching repo secret (the default GITHUB_TOKEN can't
+      # write to other repos). Snapshot builds skip this block entirely,
+      # so no fallback is needed.
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: "https://kbark.dev"
     description: "Kubernetes terminal UI with an AI on the ? key"
     commit_author:
@@ -113,7 +117,8 @@ scoops:
     repository:
       owner: shivangtanwar
       name: scoop-bucket
-      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN | default .Env.GITHUB_TOKEN }}"
+      # See the homebrew_casks block above for why no fallback is needed.
+      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
     homepage: "https://kbark.dev"
     description: "Kubernetes terminal UI with an AI on the ? key"
     license: Apache-2.0
