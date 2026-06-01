@@ -22,6 +22,7 @@ import (
 	"github.com/shivangtanwar/kbark/internal/diagnose"
 	"github.com/shivangtanwar/kbark/internal/kube"
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
+	"github.com/shivangtanwar/kbark/internal/transcript"
 	"github.com/shivangtanwar/kbark/internal/tui/components"
 	"github.com/shivangtanwar/kbark/internal/tui/theme"
 	"github.com/shivangtanwar/kbark/internal/tui/views"
@@ -112,12 +113,14 @@ type Model struct {
 	aiModel             string
 	describeService     *describe.Service
 
-	logsCh           <-chan []string
-	logsDone         <-chan struct{}
-	logsPod          *corev1.Pod
-	logsContainer    string
-	diagnoseSession  *diagnose.Session
-	diagnoseEventsCh <-chan ai.Event
+	logsCh             <-chan []string
+	logsDone           <-chan struct{}
+	logsPod            *corev1.Pod
+	logsContainer      string
+	diagnoseSession    *diagnose.Session
+	diagnoseEventsCh   <-chan ai.Event
+	transcriptRecorder *transcript.Recorder
+	transcriptDir      string
 
 	registry         *kinds.Registry
 	resourceServices map[string]*kube.ResourceService
@@ -181,6 +184,12 @@ func NewModel(deps ModelDeps) Model {
 			m.resourceView = views.NewTableResourceView(th, p)
 		}
 	}
+	// Transcript dir is resolved once at startup. A failure to resolve
+	// (e.g. unsupported platform) downgrades to in-memory-only — the
+	// modal still works; saves just no-op.
+	if dir, err := transcript.DefaultDir(); err == nil {
+		m.transcriptDir = dir
+	}
 	return m
 }
 
@@ -226,22 +235,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DiagnosisDeltaMsg:
 		m.diagnoseView = m.diagnoseView.AppendText(msg.Text)
+		m.transcriptRecorder.AppendDelta(msg.Text)
 		return m, waitForDiagnoseEvent(m.diagnoseEventsCh)
 
 	case DiagnosisToolCallMsg:
 		m.diagnoseView = m.diagnoseView.AppendToolCall(msg.Name)
+		m.transcriptRecorder.AppendToolCall(msg.Name)
 		return m, waitForDiagnoseEvent(m.diagnoseEventsCh)
 
 	case DiagnosisDoneMsg:
 		m.diagnoseView = m.diagnoseView.MarkDone()
 		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
 		m.diagnoseEventsCh = nil
+		m.transcriptRecorder.MarkDone()
+		// Best-effort save — never blocks the UI on a slow disk and
+		// never propagates the error (the diagnosis itself succeeded).
+		_, _ = m.transcriptRecorder.Save(m.transcriptDir)
 		return m, nil
 
 	case DiagnosisErrorMsg:
 		m.diagnoseView = m.diagnoseView.MarkError(msg.Err)
 		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
 		m.diagnoseEventsCh = nil
+		m.transcriptRecorder.MarkError(msg.Err)
+		_, _ = m.transcriptRecorder.Save(m.transcriptDir)
 		return m, nil
 
 	case ResourceSnapshotMsg:
@@ -451,6 +468,15 @@ func (m Model) openDiagnoseForLog() (Model, tea.Cmd) {
 	m.diagnoseView = m.diagnoseView.SetTitle(fmt.Sprintf("%s/%s · log line %d",
 		m.logsPod.Namespace, m.logsPod.Name, idx))
 	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+	m.transcriptRecorder = transcript.New(transcript.Header{
+		Origin:     transcript.OriginLog,
+		Kind:       "Pod",
+		Namespace:  m.logsPod.Namespace,
+		Name:       m.logsPod.Name,
+		Provider:   providerName(m.aiProvider),
+		Model:      m.aiModel,
+		LogLineIdx: idx,
+	})
 
 	if m.aiProvider == nil || m.logContextBldr == nil {
 		err := errors.New("AI not configured (set ANTHROPIC_API_KEY and restart)")
@@ -460,7 +486,7 @@ func (m Model) openDiagnoseForLog() (Model, tea.Cmd) {
 	}
 
 	return m, startLogDiagnosis(m.ctx, m.logContextBldr, m.toolDispatcher, m.aiProvider, m.aiModel,
-		m.logsPod, m.logsContainer, focus)
+		m.logsPod, m.logsContainer, focus, m.transcriptRecorder)
 }
 
 func (m Model) openDiagnose() (Model, tea.Cmd) {
@@ -473,6 +499,14 @@ func (m Model) openDiagnose() (Model, tea.Cmd) {
 	m.diagnoseView = m.diagnoseView.Reset()
 	m.diagnoseView = m.diagnoseView.SetTitle(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
 	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+	m.transcriptRecorder = transcript.New(transcript.Header{
+		Origin:    transcript.OriginPod,
+		Kind:      "Pod",
+		Namespace: pod.Namespace,
+		Name:      pod.Name,
+		Provider:  providerName(m.aiProvider),
+		Model:     m.aiModel,
+	})
 
 	if m.aiProvider == nil || m.podContextBldr == nil {
 		err := errors.New("AI not configured (set ANTHROPIC_API_KEY and restart)")
@@ -481,7 +515,7 @@ func (m Model) openDiagnose() (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	return m, startDiagnosis(m.ctx, m.podContextBldr, m.toolDispatcher, m.aiProvider, m.aiModel, pod)
+	return m, startDiagnosis(m.ctx, m.podContextBldr, m.toolDispatcher, m.aiProvider, m.aiModel, pod, m.transcriptRecorder)
 }
 
 func (m Model) closeDiagnose() (Model, tea.Cmd) {
@@ -618,6 +652,14 @@ func (m Model) openDiagnoseForResource() (Model, tea.Cmd) {
 	m.diagnoseView = m.diagnoseView.Reset()
 	m.diagnoseView = m.diagnoseView.SetTitle(title)
 	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+	m.transcriptRecorder = transcript.New(transcript.Header{
+		Origin:    transcript.OriginResource,
+		Kind:      plugin.Kind,
+		Namespace: namespace,
+		Name:      name,
+		Provider:  providerName(m.aiProvider),
+		Model:     m.aiModel,
+	})
 
 	if m.aiProvider == nil || m.resourceContextBldr == nil {
 		err := errors.New("AI not configured (set ANTHROPIC_API_KEY and restart)")
@@ -627,7 +669,18 @@ func (m Model) openDiagnoseForResource() (Model, tea.Cmd) {
 	}
 
 	return m, startResourceDiagnosis(m.ctx, m.resourceContextBldr, m.toolDispatcher,
-		m.aiProvider, m.aiModel, plugin, obj)
+		m.aiProvider, m.aiModel, plugin, obj, m.transcriptRecorder)
+}
+
+// providerName returns the AI provider's identifier ("anthropic",
+// "openai", "ollama"), or "" if no provider is configured. Captured
+// in the transcript header so the user knows which model produced
+// the answer.
+func providerName(p ai.Provider) string {
+	if p == nil {
+		return ""
+	}
+	return p.Name()
 }
 
 // openDescribeForResource is the Enter handler on ViewResource.
@@ -791,9 +844,12 @@ func startResourceDiagnosis(
 	model string,
 	plugin kinds.Plugin,
 	obj runtime.Object,
+	rec *transcript.Recorder,
 ) tea.Cmd {
 	return func() tea.Msg {
 		payload := builder.Build(ctx, plugin, obj)
+		rec.SetSystemPrompt(diagnose.ResourceSystemPrompt)
+		rec.SetPayload(payload)
 		session := diagnose.StartWithPrompt(ctx, provider, model, payload, diagnose.ResourceSystemPrompt, dispatcher)
 		// Pod field stays nil — non-pod flow.
 		return DiagnosisStartedMsg{Session: session}
@@ -815,9 +871,12 @@ func startLogDiagnosis(
 	pod *corev1.Pod,
 	container string,
 	focus diagnose.LogFocus,
+	rec *transcript.Recorder,
 ) tea.Cmd {
 	return func() tea.Msg {
 		payload := builder.Build(ctx, pod, container, focus)
+		rec.SetSystemPrompt(diagnose.LogSystemPrompt)
+		rec.SetPayload(payload)
 		session := diagnose.StartWithPrompt(ctx, provider, model, payload, diagnose.LogSystemPrompt, dispatcher)
 		return DiagnosisStartedMsg{Session: session, Pod: pod}
 	}
@@ -835,9 +894,12 @@ func startDiagnosis(
 	provider ai.Provider,
 	model string,
 	pod *corev1.Pod,
+	rec *transcript.Recorder,
 ) tea.Cmd {
 	return func() tea.Msg {
 		payload := builder.Build(ctx, pod)
+		rec.SetSystemPrompt(diagnose.SystemPrompt)
+		rec.SetPayload(payload)
 		session := diagnose.Start(ctx, provider, model, payload, dispatcher)
 		return DiagnosisStartedMsg{Session: session, Pod: pod}
 	}
