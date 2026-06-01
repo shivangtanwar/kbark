@@ -65,6 +65,36 @@ func TestService_YAMLNilObjectErrors(t *testing.T) {
 	}
 }
 
+// TestService_YAMLStripsManagedFields pins the readability fix:
+// Kubernetes objects accumulate verbose managedFields entries that
+// dominate the YAML view (often 100+ lines per controller edit). We
+// strip them so the user sees the parts they actually care about
+// (metadata, spec, status), the same way `kubectl get -o yaml
+// --show-managed-fields=false` works.
+func TestService_YAMLStripsManagedFields(t *testing.T) {
+	svc := describe.NewService(nil)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "alpha",
+			Namespace: "default",
+			ManagedFields: []metav1.ManagedFieldsEntry{
+				{Manager: "kubectl", Operation: "Update", APIVersion: "v1"},
+				{Manager: "kubelet", Operation: "Update", APIVersion: "v1"},
+			},
+		},
+	}
+	out, err := svc.YAML(pod, kinds.Pods())
+	if err != nil {
+		t.Fatalf("YAML: %v", err)
+	}
+	if strings.Contains(out, "managedFields") {
+		t.Errorf("managedFields should be stripped from YAML output, got:\n%s", out)
+	}
+	if strings.Contains(out, "kubectl") || strings.Contains(out, "kubelet") {
+		t.Errorf("manager names from managedFields should not appear, got:\n%s", out)
+	}
+}
+
 // TestService_DescribeWithoutRESTGetterReturnsError pins the
 // fallback behaviour when kubeconfig wiring failed at startup — the
 // modal still works (YAML-only) and the describe call surfaces an
