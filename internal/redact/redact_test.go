@@ -118,6 +118,62 @@ func TestRedact_emptyInput(t *testing.T) {
 	}
 }
 
+// TestRedact_kubectlDescribeConfigMapShape pins the M8.3 multiline
+// pattern. kubectl describe emits ConfigMap/Secret data as:
+//
+//	api_token:
+//	----
+//	ya29.abc
+//
+// The original inline-only matcher caught the `----` separator as
+// the value and left the real value exposed on the next line. The
+// fix scans this shape explicitly.
+func TestRedact_kubectlDescribeConfigMapShape(t *testing.T) {
+	in := `Data
+====
+api_token:
+----
+ya29.abc
+
+database_password:
+----
+hunter2
+
+LOG_LEVEL: info`
+	out := redact.Redact(in)
+
+	for _, leaked := range []string{"ya29.abc", "hunter2"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("value %q leaked through redaction:\n%s", leaked, out)
+		}
+	}
+	// Both keys must still be visible — the model needs to know
+	// the resource has a "password"/"token" field.
+	for _, want := range []string{"api_token:", "database_password:", redact.Placeholder} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output:\n%s", want, out)
+		}
+	}
+	// Non-credential lines flow through.
+	if !strings.Contains(out, "LOG_LEVEL: info") {
+		t.Errorf("non-secret line lost:\n%s", out)
+	}
+}
+
+// TestRedact_kubectlDescribeWithoutSeparator pins the variant where
+// the `----` separator is absent (rare but valid).
+func TestRedact_kubectlDescribeWithoutSeparator(t *testing.T) {
+	in := `password:
+hunter2`
+	out := redact.Redact(in)
+	if strings.Contains(out, "hunter2") {
+		t.Errorf("value leaked without separator line:\n%s", out)
+	}
+	if !strings.Contains(out, redact.Placeholder) {
+		t.Errorf("placeholder missing:\n%s", out)
+	}
+}
+
 // TestRedact_passesNonSecretText pins that ordinary k8s describe
 // output (events, container state, resource limits) flows through
 // without any spurious redaction.
