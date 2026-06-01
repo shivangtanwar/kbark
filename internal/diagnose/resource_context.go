@@ -12,6 +12,7 @@ import (
 
 	"github.com/shivangtanwar/kbark/internal/describe"
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
+	"github.com/shivangtanwar/kbark/internal/redact"
 )
 
 // ResourceContextBuilder assembles the AI payload for `?` on a
@@ -61,7 +62,10 @@ func (b *ResourceContextBuilder) Build(ctx context.Context, plugin kinds.Plugin,
 	out.WriteString(strings.TrimRight(text, "\n"))
 	out.WriteString("\n```\n")
 
-	return out.String()
+	// Redaction pass — kubectl describe surfaces configmap values
+	// and (for some kinds) annotation/env content that may contain
+	// secrets even when the underlying object's .data is gated.
+	return redact.Redact(out.String())
 }
 
 func metaIdentity(obj runtime.Object) (namespace, name string) {

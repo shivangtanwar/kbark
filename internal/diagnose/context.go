@@ -20,6 +20,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/shivangtanwar/kbark/internal/redact"
 )
 
 // LogTailLines is how many trailing log lines to include in the context.
@@ -69,7 +71,11 @@ func (b *PodContextBuilder) Build(ctx context.Context, pod *corev1.Pod) string {
 		writeLogs(&out, logs)
 	}
 
-	return out.String()
+	// Final redaction pass — strips secret-looking values out of
+	// container env entries, log lines, and any other text that the
+	// k8s API surfaced. Idempotent, so it's safe to also redact in
+	// the transcript layer later.
+	return redact.Redact(out.String())
 }
 
 func writeStatus(out *strings.Builder, pod *corev1.Pod) {

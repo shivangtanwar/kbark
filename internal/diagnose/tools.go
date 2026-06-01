@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/shivangtanwar/kbark/internal/ai"
+	"github.com/shivangtanwar/kbark/internal/redact"
 )
 
 // ToolNames are the canonical identifiers the model uses to call into
@@ -161,7 +162,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, call ai.ToolCallEvent) (strin
 	if err != nil {
 		return result, err
 	}
-	return truncateResult(result), nil
+	// Redact before truncation so a secret value isn't half-revealed
+	// by a truncation cut in the middle of it. The model sees the
+	// scrubbed result; the same content lands in the transcript.
+	return truncateResult(redact.Redact(result)), nil
 }
 
 func truncateResult(s string) string {

@@ -96,6 +96,35 @@ func TestPodContext_terminatingPodMarked(t *testing.T) {
 	mustContain(t, payload, "DeletionTimestamp: set (pod is terminating)")
 }
 
+// TestPodContext_redactsSecretsInEnv pins the M8.3 wiring: when the
+// pod's container env contains a value that looks like a secret
+// (DB_PASSWORD, JWT_SECRET, etc.), the builder's redaction pass must
+// scrub it before the payload reaches the model. The container's
+// regular env (image name, log level) flows through untouched.
+//
+// Note: the pod's Spec.Containers env doesn't end up in the current
+// PodContextBuilder.Build output (which only covers status fields).
+// This test simulates the equivalent by stuffing a secret-looking
+// value into Status.Message — confirming the redactor is invoked on
+// the assembled string and not bypassed.
+func TestPodContext_redactsSecretsInEnv(t *testing.T) {
+	pod := crashLoopPod()
+	pod.Status.Reason = "Failed"
+	pod.Status.Message = `Could not init: password: hunter2 (env DB_PASSWORD=hunter2)`
+
+	cs := fake.NewSimpleClientset()
+	b := diagnose.NewPodContextBuilder(cs)
+
+	payload := b.Build(context.Background(), pod)
+
+	if strings.Contains(payload, "hunter2") {
+		t.Errorf("password value leaked into payload:\n%s", payload)
+	}
+	if !strings.Contains(payload, "<redacted>") {
+		t.Errorf("redaction placeholder missing from payload:\n%s", payload)
+	}
+}
+
 func mustContain(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {
