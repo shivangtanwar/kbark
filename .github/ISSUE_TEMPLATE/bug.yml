@@ -74,6 +74,15 @@ body:
     validations:
       required: false
 
+  - type: input
+    id: ai-provider
+    attributes:
+      label: AI provider and model
+      description: Only if the bug involves the `?` key. From your config — e.g. `anthropic / claude-opus-4-7`, `openai / gpt-4o`, `ollama / llama3.1`.
+      placeholder: anthropic / claude-opus-4-7
+    validations:
+      required: false
+
   - type: textarea
     id: logs
     attributes:
