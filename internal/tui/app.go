@@ -18,6 +18,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	"github.com/shivangtanwar/kbark/internal/ai"
+	"github.com/shivangtanwar/kbark/internal/config"
 	"github.com/shivangtanwar/kbark/internal/describe"
 	"github.com/shivangtanwar/kbark/internal/diagnose"
 	"github.com/shivangtanwar/kbark/internal/kube"
@@ -64,6 +65,9 @@ type ModelDeps struct {
 	// TokenBudget caps payload+system-prompt estimated tokens per
 	// session. 0 = unbounded.
 	TokenBudget int
+	// Config is the full parsed config (all profiles). Used for
+	// mid-session `:profile <name>` switching. May be nil in tests.
+	Config *config.Config
 	// DescribeService powers the Enter-key modal. May be nil if no
 	// REST config could be built at startup; the modal then surfaces
 	// YAML only and shows an actionable error for the describe text.
@@ -116,6 +120,7 @@ type Model struct {
 	aiProvider          ai.Provider
 	aiModel             string
 	tokenBudget         int
+	cfg                 *config.Config
 	describeService     *describe.Service
 
 	logsCh             <-chan []string
@@ -172,6 +177,7 @@ func NewModel(deps ModelDeps) Model {
 		aiProvider:          deps.AIProvider,
 		aiModel:             deps.AIModel,
 		tokenBudget:         deps.TokenBudget,
+		cfg:                 deps.Config,
 		describeService:     deps.DescribeService,
 		registry:            deps.KindRegistry,
 		resourceServices:    deps.ResourceServices,
@@ -559,6 +565,9 @@ func (m Model) submitCmd() (Model, tea.Cmd) {
 		ns := parts[1]
 		return m, func() tea.Msg { return NamespaceChangedMsg{Namespace: ns} }
 	}
+	if len(parts) == 2 && parts[0] == "profile" {
+		return m.switchProfile(parts[1])
+	}
 	if len(parts) == 1 {
 		key := parts[0]
 		if m.registry != nil {
@@ -621,6 +630,38 @@ func (m Model) switchToHome() (Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.switchToResource(p)
+}
+
+// switchProfile resolves the named profile against the loaded config
+// and swaps the AI provider, model, and token budget in place. The
+// next `?` press uses the new profile. Failure modes (no config,
+// unknown name, provider credentials missing) surface as cmdbar
+// errors and leave the current profile untouched.
+//
+// In-flight diagnose sessions aren't cancelled — they continue under
+// the old provider — to avoid a confusing mid-stream interruption.
+func (m Model) switchProfile(name string) (Model, tea.Cmd) {
+	if m.cfg == nil {
+		m.cmdbar = m.cmdbar.Activate().SetError("config not loaded; profile switching unavailable")
+		return m, nil
+	}
+	p, err := m.cfg.Resolve(name)
+	if err != nil {
+		m.cmdbar = m.cmdbar.Activate().SetError(err.Error())
+		return m, nil
+	}
+	prov, err := ai.New(p.Provider)
+	if err != nil {
+		m.cmdbar = m.cmdbar.Activate().SetError("profile " + name + ": " + err.Error())
+		return m, nil
+	}
+	m.aiProvider = prov
+	m.aiModel = p.Model
+	m.tokenBudget = p.TokenBudget
+	m.profile = name
+	m.cmdbar = m.cmdbar.Deactivate()
+	m.resizeAll()
+	return m, nil
 }
 
 // openDiagnoseForResource is the `?` handler for non-pod kinds.
