@@ -20,6 +20,7 @@ import (
 	"github.com/shivangtanwar/kbark/internal/kube"
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
 	"github.com/shivangtanwar/kbark/internal/tui"
+	"github.com/shivangtanwar/kbark/internal/tui/theme"
 )
 
 var profileFlag string
@@ -151,6 +152,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		AIModel:                profile.Model,
 		TokenBudget:            profile.TokenBudget,
 		Config:                 cfg,
+		Theme:                  ptrTheme(theme.ResolveByName(profile.Theme)),
 		DescribeService:        describeService,
 		KindRegistry:           registry,
 		ResourceServices:       resourceServices,
@@ -170,3 +172,8 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	}
 	return nil
 }
+
+// ptrTheme adapts theme.ResolveByName's value return into the pointer
+// shape tui.ModelDeps expects (nil-able, so tests can pass nil for
+// "default").
+func ptrTheme(t theme.Theme) *theme.Theme { return &t }
