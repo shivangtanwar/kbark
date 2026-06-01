@@ -37,3 +37,16 @@ jobs:
 
       - name: go test
         run: go test -race -count=1 ./...
+
+      - name: envtest e2e (linux only)
+        # Only on ubuntu — controller-runtime's envtest only publishes
+        # binaries for linux + darwin, and we get equivalent coverage
+        # from one OS. Build-tag gates the test from the default suite
+        # above; this step opts in explicitly.
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+          ENVTEST_BIN="$(setup-envtest use 1.32 --bin-dir "$RUNNER_TEMP/envtest-bins" -p path)"
+          mkdir -p .envtest-bins
+          cp -R "$ENVTEST_BIN"/* .envtest-bins/
+          go test -race -count=1 -tags=envtest ./internal/kube/...

@@ -31,3 +31,6 @@ kubecon-cfp-draft.md
 
 # claude code working dir
 .claude/
+
+# envtest local-dev binaries (apiserver, etcd, kubectl)
+/.envtest-bins/

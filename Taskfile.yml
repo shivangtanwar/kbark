@@ -31,6 +31,21 @@ tasks:
     cmds:
       - go test -race -count=1 ./...
 
+  envtest-setup:
+    desc: Download envtest binaries (apiserver, etcd, kubectl) into ./.envtest-bins
+    cmds:
+      - go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+      - |
+        ENVTEST_BIN="$(setup-envtest use 1.32 -p path)"
+        mkdir -p .envtest-bins
+        cp -R "$ENVTEST_BIN"/* .envtest-bins/
+        echo "envtest binaries installed in ./.envtest-bins"
+
+  envtest:
+    desc: Run the envtest E2E suite (run task envtest-setup once first)
+    cmds:
+      - go test -race -count=1 -tags=envtest ./internal/kube/...
+
   lint:
     desc: Run golangci-lint
     cmds:
