@@ -46,7 +46,8 @@ Final answer rules:
 - Be specific about the likely root cause when the data supports it (e.g. "the readiness probe targets port 8081 but the container listens on 8080").
 - Cite the evidence ("the events show ImagePullBackOff", "the logs end with panic: ...") rather than asserting facts you can't see.
 - If the pod looks healthy, say so plainly and stop.
-- Never invent details that aren't in the data. If logs are absent, say "no logs available" instead of speculating.`
+- Never invent details that aren't in the data. If logs are absent, say "no logs available" instead of speculating.
+- Do NOT instruct the user to run kubectl commands themselves. The user is inside kbark — if you need more context, call a tool. When describing a fix, name the concrete change ("add a volumeMount for ConfigMap appcfg at /etc/app/"), not the kubectl invocation they'd use to investigate.`
 
 // ResourceSystemPrompt is the kind-agnostic variant used for `?` on
 // any non-pod resource (deployments, services, configmaps, …). The
@@ -73,7 +74,8 @@ Final answer rules:
 - Be specific about what the resource is doing right now (e.g. "the Deployment has 3 desired replicas but only 2 are ready because the most recent rollout's pod is failing readiness").
 - Cite evidence from the describe output ("Status shows 0/3 ready", "Events list a FailedScheduling reason of insufficient memory").
 - If the resource looks healthy, say so plainly and stop.
-- Never invent details that aren't in the data.`
+- Never invent details that aren't in the data.
+- Do NOT instruct the user to run kubectl commands themselves. The user is inside kbark — if you need more context, call a tool. When describing a fix, name the concrete change ("the Service selector should match the pod's app=foo label") rather than the kubectl invocation they'd use to investigate.`
 
 // LogSystemPrompt is the variant used when the user presses "?" on a
 // specific log line. The model sees both the pod context block and a
@@ -95,7 +97,8 @@ Final answer rules:
 - Quote the focal line at least once verbatim so the user can confirm you're talking about the right thing.
 - Be specific: "this line is the application's startup probe failing because…" rather than "this could be a problem with the application".
 - If the focal line is benign (info-level message, normal lifecycle output), say so plainly and stop.
-- Never invent details that aren't in the data.`
+- Never invent details that aren't in the data.
+- Do NOT instruct the user to run kubectl commands themselves. The user is inside kbark — if you need more context, call a tool. When describing a fix, name the concrete change rather than the kubectl invocation they'd use to investigate.`
 
 // ErrMaxToolTurnsExceeded fires when the model keeps calling tools past
 // the MaxToolTurns cap. Surfaced as an ErrorEvent to the consumer.
