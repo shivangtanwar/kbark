@@ -22,6 +22,7 @@ import (
 	"github.com/shivangtanwar/kbark/internal/diagnose"
 	"github.com/shivangtanwar/kbark/internal/kube"
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
+	"github.com/shivangtanwar/kbark/internal/tokens"
 	"github.com/shivangtanwar/kbark/internal/transcript"
 	"github.com/shivangtanwar/kbark/internal/tui/components"
 	"github.com/shivangtanwar/kbark/internal/tui/theme"
@@ -60,6 +61,9 @@ type ModelDeps struct {
 	ToolDispatcher         *diagnose.Dispatcher
 	AIProvider             ai.Provider
 	AIModel                string
+	// TokenBudget caps payload+system-prompt estimated tokens per
+	// session. 0 = unbounded.
+	TokenBudget int
 	// DescribeService powers the Enter-key modal. May be nil if no
 	// REST config could be built at startup; the modal then surfaces
 	// YAML only and shows an actionable error for the describe text.
@@ -111,6 +115,7 @@ type Model struct {
 	toolDispatcher      *diagnose.Dispatcher
 	aiProvider          ai.Provider
 	aiModel             string
+	tokenBudget         int
 	describeService     *describe.Service
 
 	logsCh             <-chan []string
@@ -166,6 +171,7 @@ func NewModel(deps ModelDeps) Model {
 		toolDispatcher:      deps.ToolDispatcher,
 		aiProvider:          deps.AIProvider,
 		aiModel:             deps.AIModel,
+		tokenBudget:         deps.TokenBudget,
 		describeService:     deps.DescribeService,
 		registry:            deps.KindRegistry,
 		resourceServices:    deps.ResourceServices,
@@ -486,7 +492,7 @@ func (m Model) openDiagnoseForLog() (Model, tea.Cmd) {
 	}
 
 	return m, startLogDiagnosis(m.ctx, m.logContextBldr, m.toolDispatcher, m.aiProvider, m.aiModel,
-		m.logsPod, m.logsContainer, focus, m.transcriptRecorder)
+		m.logsPod, m.logsContainer, focus, m.transcriptRecorder, m.tokenBudget)
 }
 
 func (m Model) openDiagnose() (Model, tea.Cmd) {
@@ -515,7 +521,7 @@ func (m Model) openDiagnose() (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	return m, startDiagnosis(m.ctx, m.podContextBldr, m.toolDispatcher, m.aiProvider, m.aiModel, pod, m.transcriptRecorder)
+	return m, startDiagnosis(m.ctx, m.podContextBldr, m.toolDispatcher, m.aiProvider, m.aiModel, pod, m.transcriptRecorder, m.tokenBudget)
 }
 
 func (m Model) closeDiagnose() (Model, tea.Cmd) {
@@ -669,7 +675,7 @@ func (m Model) openDiagnoseForResource() (Model, tea.Cmd) {
 	}
 
 	return m, startResourceDiagnosis(m.ctx, m.resourceContextBldr, m.toolDispatcher,
-		m.aiProvider, m.aiModel, plugin, obj, m.transcriptRecorder)
+		m.aiProvider, m.aiModel, plugin, obj, m.transcriptRecorder, m.tokenBudget)
 }
 
 // providerName returns the AI provider's identifier ("anthropic",
@@ -845,15 +851,36 @@ func startResourceDiagnosis(
 	plugin kinds.Plugin,
 	obj runtime.Object,
 	rec *transcript.Recorder,
+	budget int,
 ) tea.Cmd {
 	return func() tea.Msg {
 		payload := builder.Build(ctx, plugin, obj)
 		rec.SetSystemPrompt(diagnose.ResourceSystemPrompt)
 		rec.SetPayload(payload)
+		if err := checkTokenBudget(budget, payload, diagnose.ResourceSystemPrompt); err != nil {
+			rec.MarkError(err)
+			return DiagnosisErrorMsg{Err: err}
+		}
 		session := diagnose.StartWithPrompt(ctx, provider, model, payload, diagnose.ResourceSystemPrompt, dispatcher)
 		// Pod field stays nil — non-pod flow.
 		return DiagnosisStartedMsg{Session: session}
 	}
+}
+
+// checkTokenBudget returns nil when the request fits the configured
+// budget. A budget of 0 disables the check entirely. The estimate
+// errs slightly high (rounds up sub-token strings) so a request
+// right at the edge of the budget reliably trips it rather than
+// occasionally passing through.
+func checkTokenBudget(budget int, payload, systemPrompt string) error {
+	if budget <= 0 {
+		return nil
+	}
+	est := tokens.EstimateAll(payload, systemPrompt)
+	if est > budget {
+		return fmt.Errorf("payload too large: ~%d tokens exceeds profile.token_budget=%d", est, budget)
+	}
+	return nil
 }
 
 // startLogDiagnosis is the log-focused counterpart to startDiagnosis.
@@ -872,11 +899,16 @@ func startLogDiagnosis(
 	container string,
 	focus diagnose.LogFocus,
 	rec *transcript.Recorder,
+	budget int,
 ) tea.Cmd {
 	return func() tea.Msg {
 		payload := builder.Build(ctx, pod, container, focus)
 		rec.SetSystemPrompt(diagnose.LogSystemPrompt)
 		rec.SetPayload(payload)
+		if err := checkTokenBudget(budget, payload, diagnose.LogSystemPrompt); err != nil {
+			rec.MarkError(err)
+			return DiagnosisErrorMsg{Err: err}
+		}
 		session := diagnose.StartWithPrompt(ctx, provider, model, payload, diagnose.LogSystemPrompt, dispatcher)
 		return DiagnosisStartedMsg{Session: session, Pod: pod}
 	}
@@ -895,11 +927,16 @@ func startDiagnosis(
 	model string,
 	pod *corev1.Pod,
 	rec *transcript.Recorder,
+	budget int,
 ) tea.Cmd {
 	return func() tea.Msg {
 		payload := builder.Build(ctx, pod)
 		rec.SetSystemPrompt(diagnose.SystemPrompt)
 		rec.SetPayload(payload)
+		if err := checkTokenBudget(budget, payload, diagnose.SystemPrompt); err != nil {
+			rec.MarkError(err)
+			return DiagnosisErrorMsg{Err: err}
+		}
 		session := diagnose.Start(ctx, provider, model, payload, dispatcher)
 		return DiagnosisStartedMsg{Session: session, Pod: pod}
 	}

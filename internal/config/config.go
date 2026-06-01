@@ -50,6 +50,13 @@ type Profile struct {
 	// values: "on" (default), "off". The env var KBARK_TRANSCRIPTS
 	// still takes precedence at runtime.
 	Transcripts string `json:"transcripts,omitempty"`
+	// TokenBudget caps the estimated tokens for the
+	// payload+system-prompt of any single diagnose session. A
+	// payload that exceeds the budget aborts before any tokens
+	// are sent. 0 means unbounded (the default — kbark's payloads
+	// are typically a few KB and the budget is a guard, not a
+	// throttle).
+	TokenBudget int `json:"token_budget,omitempty"`
 }
 
 // TranscriptsEnabled reports whether transcripts should save under
