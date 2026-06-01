@@ -9,6 +9,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/shivangtanwar/kbark/internal/redact"
 )
 
 // LogContextDefaultWindow is the symmetric line window around the
@@ -92,5 +94,5 @@ func (b *LogContextBuilder) Build(ctx context.Context, pod *corev1.Pod, containe
 		fmt.Fprintln(&out, "```")
 	}
 
-	return out.String()
+	return redact.Redact(out.String())
 }
