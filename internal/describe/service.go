@@ -77,17 +77,23 @@ func (s *Service) Describe(ctx context.Context, plugin kinds.Plugin, namespace, 
 	}
 }
 
-// YAML serialises the cached object as `kubectl get -o yaml` would.
-// The cached object's TypeMeta is typically empty (informers strip it);
-// we copy the object so we don't mutate the shared cache and then
-// stamp apiVersion + kind from the plugin so the YAML matches what a
-// user would expect.
+// YAML serialises the cached object as `kubectl get -o yaml
+// --show-managed-fields=false` would. The cached object's TypeMeta
+// is typically empty (informers strip it); we copy the object so we
+// don't mutate the shared cache, stamp apiVersion + kind from the
+// plugin, and strip managedFields — that field is essential for the
+// Kubernetes apiserver but pure noise for a human reading the YAML
+// (often 100+ lines per object on resources that have been edited
+// by multiple controllers).
 func (s *Service) YAML(obj runtime.Object, plugin kinds.Plugin) (string, error) {
 	if obj == nil {
 		return "", fmt.Errorf("yaml: nil object")
 	}
 	cp := obj.DeepCopyObject()
 	cp.GetObjectKind().SetGroupVersionKind(plugin.GVK())
+	if accessor, err := meta.Accessor(cp); err == nil {
+		accessor.SetManagedFields(nil)
+	}
 	bytes, err := yaml.Marshal(cp)
 	if err != nil {
 		return "", fmt.Errorf("yaml marshal: %w", err)
