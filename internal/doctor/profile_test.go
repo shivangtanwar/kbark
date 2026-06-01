@@ -24,6 +24,42 @@ func TestCheckConfig_loadedFileGreen(t *testing.T) {
 	}
 }
 
+// TestCheckConfig_tokenBudgetSurfacedInProfileRow pins the M8.4
+// detail extension: when the profile sets a non-zero token_budget,
+// the doctor row surfaces it so the user can see the cap without
+// grepping the YAML.
+func TestCheckConfig_tokenBudgetSurfacedInProfileRow(t *testing.T) {
+	rows := checkConfig(Options{
+		ConfigPath:   "/cfg",
+		ConfigLoaded: true,
+		Profile:      "prod",
+		Provider:     "anthropic",
+		Model:        "claude-opus-4-7",
+		TokenBudget:  50000,
+	})
+	got := find(rows, "profile")
+	if !strings.Contains(got.Detail, "budget: 50000 tokens") {
+		t.Errorf("profile row should surface budget, got %q", got.Detail)
+	}
+}
+
+// TestCheckConfig_zeroBudgetOmitsMarker keeps the default row terse —
+// no "(budget: 0 tokens)" clutter when the feature isn't in use.
+func TestCheckConfig_zeroBudgetOmitsMarker(t *testing.T) {
+	rows := checkConfig(Options{
+		ConfigPath:   "/cfg",
+		ConfigLoaded: true,
+		Profile:      "dev",
+		Provider:     "anthropic",
+		Model:        "claude-sonnet-4-6",
+		TokenBudget:  0,
+	})
+	got := find(rows, "profile")
+	if strings.Contains(got.Detail, "budget") {
+		t.Errorf("zero budget should not show in row, got %q", got.Detail)
+	}
+}
+
 func TestCheckConfig_missingFileGreenWithNote(t *testing.T) {
 	rows := checkConfig(Options{
 		ConfigPath:   "/home/u/.config/kbark/config.yaml",

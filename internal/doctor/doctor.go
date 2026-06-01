@@ -63,6 +63,10 @@ type Options struct {
 	Provider string
 	// Model is the provider-specific model identifier.
 	Model string
+	// TokenBudget is the per-session estimated-tokens cap from the
+	// active profile (0 = unbounded). Surfaced in the profile row
+	// when non-zero so the user can see the limit at a glance.
+	TokenBudget int
 	// ProfileErr, when non-nil, indicates the --profile flag pointed
 	// at an unknown name or the config file was malformed. The
 	// doctor surfaces this as a RED "profile" row but continues

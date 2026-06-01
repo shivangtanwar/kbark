@@ -72,6 +72,7 @@ func buildDoctorOptions() doctor.Options {
 	}
 	opts.Provider = profile.Provider
 	opts.Model = profile.Model
+	opts.TokenBudget = profile.TokenBudget
 	return opts
 }
 

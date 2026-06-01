@@ -40,6 +40,9 @@ func checkConfig(opts Options) []Result {
 		return out
 	}
 	detail := fmt.Sprintf("%s → %s %s", opts.Profile, opts.Provider, opts.Model)
+	if opts.TokenBudget > 0 {
+		detail += fmt.Sprintf(" (budget: %d tokens)", opts.TokenBudget)
+	}
 	out = append(out, Result{Name: "profile", Status: Green, Detail: detail})
 	return out
 }

@@ -149,6 +149,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		ToolDispatcher:         dispatcher,
 		AIProvider:             aiProvider,
 		AIModel:                profile.Model,
+		TokenBudget:            profile.TokenBudget,
 		DescribeService:        describeService,
 		KindRegistry:           registry,
 		ResourceServices:       resourceServices,
