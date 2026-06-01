@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/shivangtanwar/kbark/internal/config"
 	"github.com/shivangtanwar/kbark/internal/describe"
 	"github.com/shivangtanwar/kbark/internal/kube"
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
@@ -146,6 +147,50 @@ func TestOpenDescribeForResource_emptyViewIsNoop(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Errorf("empty Enter should return nil Cmd, got %v", cmd)
+	}
+}
+
+// TestSubmitCmd_profileSwitchesProviderAndModel pins the M9.2 mid-
+// session switch. `:profile opus` resolves "opus" against the loaded
+// config and swaps the active provider/model/budget so the next `?`
+// fires under the new profile.
+func TestSubmitCmd_profileSwitchesProviderAndModel(t *testing.T) {
+	m := modelWithRegistry(t)
+	m.cfg = &config.Config{
+		DefaultProfile: "dev",
+		Profiles: map[string]config.Profile{
+			"dev":  {Provider: "ollama", Model: "llama3.2"},
+			"opus": {Provider: "ollama", Model: "claude-opus-via-ollama-test"},
+		},
+	}
+	m.profile = "dev"
+	m.aiModel = "llama3.2"
+	m.cmdbar = m.cmdbar.SetValue("profile opus")
+
+	next, _ := m.submitCmd()
+	if next.profile != "opus" {
+		t.Errorf("profile = %q, want %q", next.profile, "opus")
+	}
+	if next.aiModel != "claude-opus-via-ollama-test" {
+		t.Errorf("aiModel = %q, want %q", next.aiModel, "claude-opus-via-ollama-test")
+	}
+}
+
+// TestSubmitCmd_profileUnknownNameShowsError pins the failure UX —
+// a typo in the profile name reports inline rather than silently
+// keeping the current profile or hard-erroring out.
+func TestSubmitCmd_profileUnknownNameShowsError(t *testing.T) {
+	m := modelWithRegistry(t)
+	m.cfg = &config.Config{
+		DefaultProfile: "dev",
+		Profiles:       map[string]config.Profile{"dev": {Provider: "ollama", Model: "llama3.2"}},
+	}
+	m.profile = "dev"
+	m.cmdbar = m.cmdbar.SetValue("profile typo")
+
+	next, _ := m.submitCmd()
+	if next.profile != "dev" {
+		t.Errorf("profile changed despite unknown name: %q", next.profile)
 	}
 }
 
