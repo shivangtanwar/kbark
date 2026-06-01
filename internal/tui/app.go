@@ -54,6 +54,7 @@ type ModelDeps struct {
 	Profile           string
 	LogService        *kube.LogService
 	PodContextBuilder *diagnose.PodContextBuilder
+	LogContextBuilder *diagnose.LogContextBuilder
 	ToolDispatcher    *diagnose.Dispatcher
 	AIProvider        ai.Provider
 	AIModel           string
@@ -91,14 +92,19 @@ type Model struct {
 	contextName string
 	namespace   string
 
-	active       ActiveView
-	logsView     views.LogsView
-	diagnoseView views.DiagnoseView
-	describeView views.DescribeView
-	cmdbar       components.Cmdbar
+	active ActiveView
+	// diagnoseOrigin is the view to return to when the diagnose
+	// modal closes. ViewResource for `?`-on-pod; ViewLogs for
+	// `?`-on-log-line.
+	diagnoseOrigin ActiveView
+	logsView       views.LogsView
+	diagnoseView   views.DiagnoseView
+	describeView   views.DescribeView
+	cmdbar         components.Cmdbar
 
 	logService      *kube.LogService
 	podContextBldr  *diagnose.PodContextBuilder
+	logContextBldr  *diagnose.LogContextBuilder
 	toolDispatcher  *diagnose.Dispatcher
 	aiProvider      ai.Provider
 	aiModel         string
@@ -106,6 +112,8 @@ type Model struct {
 
 	logsCh           <-chan []string
 	logsDone         <-chan struct{}
+	logsPod          *corev1.Pod
+	logsContainer    string
 	diagnoseSession  *diagnose.Session
 	diagnoseEventsCh <-chan ai.Event
 
@@ -148,6 +156,7 @@ func NewModel(deps ModelDeps) Model {
 		cmdbar:           components.NewCmdbar(th),
 		logService:       deps.LogService,
 		podContextBldr:   deps.PodContextBuilder,
+		logContextBldr:   deps.LogContextBuilder,
 		toolDispatcher:   deps.ToolDispatcher,
 		aiProvider:       deps.AIProvider,
 		aiModel:          deps.AIModel,
@@ -320,6 +329,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "f":
 			m.logsView = m.logsView.ToggleFollow()
 			return m, nil
+		case "?":
+			return m.openDiagnoseForLog()
 		}
 		var cmd tea.Cmd
 		m.logsView, cmd = m.logsView.Update(msg)
@@ -380,6 +391,11 @@ func (m Model) openLogs() (Model, tea.Cmd) {
 	m.logsView = m.logsView.SetSize(m.width, m.contentHeight())
 	m.logsCh = streamer.Snapshots()
 	m.logsDone = streamer.Done()
+	m.logsPod = pod
+	// Empty container means "the only container" to LogService.Stream;
+	// the diagnose payload reports it as "" which the builder handles
+	// by omitting the line.
+	m.logsContainer = ""
 	return m, waitForLogs(m.logsCh, m.logsDone)
 }
 
@@ -390,7 +406,53 @@ func (m Model) closeLogs() (Model, tea.Cmd) {
 	m.active = ViewResource
 	m.logsCh = nil
 	m.logsDone = nil
+	m.logsPod = nil
+	m.logsContainer = ""
 	return m, nil
+}
+
+// openDiagnoseForLog is the `?` handler on ViewLogs. Pulls the cursor
+// line + ±LogContextDefaultWindow window from the LogsView, builds a
+// log-focused payload, and starts a diagnose session with the
+// log-flow system prompt. Falls through to a no-op if the cursor is
+// somehow invalid (empty buffer) or the AI / context builder isn't
+// wired.
+func (m Model) openDiagnoseForLog() (Model, tea.Cmd) {
+	if m.logsPod == nil {
+		return m, nil
+	}
+	line, idx, ok := m.logsView.SelectedLine()
+	if !ok {
+		return m, nil
+	}
+	window := m.logsView.LinesAround(idx, diagnose.LogContextDefaultWindow, diagnose.LogContextDefaultWindow)
+	windowStart := idx - diagnose.LogContextDefaultWindow
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	focus := diagnose.LogFocus{
+		Line:        line,
+		Index:       idx,
+		Window:      window,
+		WindowStart: windowStart,
+	}
+
+	m.diagnoseOrigin = ViewLogs
+	m.active = ViewDiagnose
+	m.diagnoseView = m.diagnoseView.Reset()
+	m.diagnoseView = m.diagnoseView.SetTitle(fmt.Sprintf("%s/%s · log line %d",
+		m.logsPod.Namespace, m.logsPod.Name, idx))
+	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+
+	if m.aiProvider == nil || m.logContextBldr == nil {
+		err := errors.New("AI not configured (set ANTHROPIC_API_KEY and restart)")
+		m.diagnoseView = m.diagnoseView.MarkError(err)
+		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+		return m, nil
+	}
+
+	return m, startLogDiagnosis(m.ctx, m.logContextBldr, m.toolDispatcher, m.aiProvider, m.aiModel,
+		m.logsPod, m.logsContainer, focus)
 }
 
 func (m Model) openDiagnose() (Model, tea.Cmd) {
@@ -398,6 +460,7 @@ func (m Model) openDiagnose() (Model, tea.Cmd) {
 	if pod == nil {
 		return m, nil
 	}
+	m.diagnoseOrigin = ViewResource
 	m.active = ViewDiagnose
 	m.diagnoseView = m.diagnoseView.Reset()
 	m.diagnoseView = m.diagnoseView.SetTitle(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
@@ -419,7 +482,14 @@ func (m Model) closeDiagnose() (Model, tea.Cmd) {
 		m.diagnoseSession = nil
 	}
 	m.diagnoseEventsCh = nil
-	m.active = ViewResource
+	// Return to wherever `?` was pressed (pod table or logs view).
+	// Defaults to ViewResource (pod table) when origin wasn't set.
+	if m.diagnoseOrigin == ViewLogs {
+		m.active = ViewLogs
+	} else {
+		m.active = ViewResource
+	}
+	m.diagnoseOrigin = ViewResource
 	return m, nil
 }
 
@@ -652,6 +722,29 @@ func (m Model) contentHeight() int {
 		return 0
 	}
 	return h
+}
+
+// startLogDiagnosis is the log-focused counterpart to startDiagnosis.
+// Builds a payload anchored on a specific log line (with surrounding
+// window + pod context) and opens a session with the log system prompt.
+// Same Cmd-then-message shape as startDiagnosis so the existing
+// DiagnosisStartedMsg / DiagnosisDeltaMsg / DiagnosisToolCallMsg
+// pumping logic just works.
+func startLogDiagnosis(
+	ctx context.Context,
+	builder *diagnose.LogContextBuilder,
+	dispatcher *diagnose.Dispatcher,
+	provider ai.Provider,
+	model string,
+	pod *corev1.Pod,
+	container string,
+	focus diagnose.LogFocus,
+) tea.Cmd {
+	return func() tea.Msg {
+		payload := builder.Build(ctx, pod, container, focus)
+		session := diagnose.StartWithPrompt(ctx, provider, model, payload, diagnose.LogSystemPrompt, dispatcher)
+		return DiagnosisStartedMsg{Session: session, Pod: pod}
+	}
 }
 
 // startDiagnosis builds the pod context payload (cheap API calls under a

@@ -54,6 +54,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	namespace, _, _ := kubeFlags.ToRawKubeConfigLoader().Namespace()
 	logService := kube.NewLogService(clientset, ctx)
 	podContextBuilder := diagnose.NewPodContextBuilder(clientset)
+	logContextBuilder := diagnose.NewLogContextBuilder(clientset)
 
 	// Dynamic client powers the get_resource tool. If the rest config
 	// build fails for some reason, the dispatcher gracefully reports a
@@ -116,6 +117,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		Profile:           profileFlag,
 		LogService:        logService,
 		PodContextBuilder: podContextBuilder,
+		LogContextBuilder: logContextBuilder,
 		ToolDispatcher:    dispatcher,
 		AIProvider:        aiProvider,
 		AIModel:           defaultAIModel,
