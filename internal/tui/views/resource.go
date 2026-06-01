@@ -13,9 +13,9 @@ import (
 )
 
 // ResourceView is the kind-generic view the root Model talks to for
-// any non-pod resource kind. PodView intentionally does not implement
-// this in M2.1 to keep the diagnose `?` flow's typed *corev1.Pod
-// access undisturbed — the M2.2 refactor unifies them.
+// every resource kind, including pods. The pod-specific flows
+// (logs, `?` diagnosis) recover their typed *corev1.Pod via a type
+// assertion on SelectedObject().
 type ResourceView interface {
 	SetSize(width, height int) ResourceView
 	SetObjects(objs []runtime.Object) ResourceView

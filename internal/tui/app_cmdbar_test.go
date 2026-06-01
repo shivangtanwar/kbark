@@ -20,9 +20,11 @@ import (
 )
 
 // modelWithRegistry returns a Model wired with the kind registry and
-// a pre-built ResourceService for "dep" backed by a fake clientset.
-// Skips the bubbletea program — submitCmd is callable directly because
-// the cmdbar can be primed via SetValue.
+// pre-built ResourceServices for "po"/"dep"/"svc" backed by a fake
+// clientset. Skips the bubbletea program — submitCmd is callable
+// directly because the cmdbar can be primed via SetValue. The model
+// lands on ViewResource with the pod kind selected (matching app
+// startup behaviour).
 func modelWithRegistry(t *testing.T) Model {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -31,6 +33,7 @@ func modelWithRegistry(t *testing.T) Model {
 	cs := fake.NewSimpleClientset()
 	registry := kinds.NewRegistry(kinds.Pods(), kinds.Deployments(), kinds.Services())
 	services := map[string]*kube.ResourceService{
+		"po":  kube.NewResourceService(cs, kube.DefaultResyncInterval, ctx, kinds.Pods()),
 		"dep": kube.NewResourceService(cs, kube.DefaultResyncInterval, ctx, kinds.Deployments()),
 		"svc": kube.NewResourceService(cs, kube.DefaultResyncInterval, ctx, kinds.Services()),
 	}
@@ -38,11 +41,13 @@ func modelWithRegistry(t *testing.T) Model {
 	th := theme.Default()
 	return Model{
 		ctx:              ctx,
-		active:           ViewPods,
+		active:           ViewResource,
 		namespace:        "default",
 		cmdbar:           components.NewCmdbar(th).Activate(),
 		registry:         registry,
 		resourceServices: services,
+		homeKind:         "po",
+		resourceKind:     "po",
 		th:               th,
 		width:            120,
 		height:           24,
@@ -72,17 +77,20 @@ func TestSubmitCmd_kindKeyOpensResourceView(t *testing.T) {
 	}
 }
 
-// TestSubmitCmd_poReturnsToPods pins the `:po` shortcut that takes
-// the user back to the pod view from a resource view.
-func TestSubmitCmd_poReturnsToPods(t *testing.T) {
+// TestSubmitCmd_poSwitchesToPodKind pins `:po` — the cmdbar shortcut
+// for switching back to the (default home) pods kind. After refactor,
+// pods are just another kind that goes through switchToResource.
+func TestSubmitCmd_poSwitchesToPodKind(t *testing.T) {
 	m := modelWithRegistry(t)
-	m.active = ViewResource
-	m.resourceKind = "dep"
+	m.resourceKind = "dep" // pretend user was on :dep
 	m.cmdbar = m.cmdbar.SetValue("po")
 
 	next, _ := m.submitCmd()
-	if next.active != ViewPods {
-		t.Errorf("after :po, active = %v, want ViewPods", next.active)
+	if next.active != ViewResource {
+		t.Errorf("after :po, active = %v, want ViewResource", next.active)
+	}
+	if next.resourceKind != "po" {
+		t.Errorf("after :po, resourceKind = %q, want %q", next.resourceKind, "po")
 	}
 }
 
@@ -93,18 +101,17 @@ func TestSubmitCmd_unknownKeySetsError(t *testing.T) {
 	m.cmdbar = m.cmdbar.SetValue("bogus")
 
 	next, _ := m.submitCmd()
-	if next.active != ViewPods {
-		t.Errorf("after :bogus, active = %v, want ViewPods (unchanged)", next.active)
+	if next.active != ViewResource {
+		t.Errorf("after :bogus, active = %v, want ViewResource (unchanged)", next.active)
 	}
-	if next.resourceKind != "" {
-		t.Errorf("after :bogus, resourceKind = %q, want empty", next.resourceKind)
+	if next.resourceKind != "po" {
+		t.Errorf("after :bogus, resourceKind = %q, want %q (unchanged)", next.resourceKind, "po")
 	}
 }
 
-// TestOpenDescribeForResource_routesToDescribeView pins the M2.5b
-// flip — Enter on a non-pod resource view must open the describe
-// modal, set prevActive=ViewResource (so esc returns to the resource
-// list), and seed the YAML buffer off the cached object.
+// TestOpenDescribeForResource_routesToDescribeView pins the Enter
+// path — opens the describe modal off the selected object and seeds
+// the YAML buffer.
 func TestOpenDescribeForResource_routesToDescribeView(t *testing.T) {
 	m := modelWithRegistry(t)
 	m.describeService = describe.NewService(nil)
@@ -119,9 +126,6 @@ func TestOpenDescribeForResource_routesToDescribeView(t *testing.T) {
 	next, _ := m.openDescribeForResource()
 	if next.active != ViewDescribe {
 		t.Errorf("active = %v, want ViewDescribe", next.active)
-	}
-	if next.prevActive != ViewResource {
-		t.Errorf("prevActive = %v, want ViewResource (so esc returns to :dep)", next.prevActive)
 	}
 }
 

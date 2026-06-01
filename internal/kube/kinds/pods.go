@@ -13,11 +13,9 @@ import (
 	"github.com/shivangtanwar/kbark/internal/tui/components"
 )
 
-// Pods is the plugin for pods. Currently unused by the running TUI
-// (the legacy typed PodView still drives the pod path so the diagnose
-// `?` flow keeps its *corev1.Pod access); kept here so M2.2's PodView
-// refactor onto TableResourceView is a deletion-and-rewire, not a
-// fresh design pass.
+// Pods is the plugin for pods. Used by the running TUI as the default
+// home kind; the diagnose `?` flow recovers its typed *corev1.Pod
+// access via TableResourceView.SelectedObject() + a type assertion.
 func Pods() Plugin {
 	return Plugin{
 		Key:         "po",

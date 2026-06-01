@@ -48,7 +48,8 @@ func renderResults(w io.Writer, results []doctor.Result) {
 		useColor = term.IsTerminal(int(f.Fd()))
 	}
 	for _, r := range results {
-		fmt.Fprintf(w, "%-12s %s  %s\n",
+		fmt.Fprintf(
+			w, "%-12s %s  %s\n",
 			r.Name+":",
 			colorize(r.Status, useColor),
 			r.Detail,

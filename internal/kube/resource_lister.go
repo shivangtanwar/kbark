@@ -18,11 +18,11 @@ import (
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
 )
 
-// ResourceLister is the kind-generic counterpart of PodLister.
-// Behaviour is intentionally identical: debounce events over
-// DefaultDebounce, sort by name, emit on a buffer-1 channel that drops
-// stale snapshots when the consumer falls behind, and bound startup
-// sync on SyncTimeout so an unreachable apiserver fails fast.
+// ResourceLister is the kind-generic informer wrapper. Behaviour:
+// debounce events over DefaultDebounce, sort by name, emit on a
+// buffer-1 channel that drops stale snapshots when the consumer falls
+// behind, and bound startup sync on SyncTimeout so an unreachable
+// apiserver fails fast.
 //
 // The per-kind plug-in surface is just Plugin.GVR — `factory.ForResource`
 // hands back the same SharedIndexInformer instance that the typed
@@ -64,8 +64,8 @@ func NewResourceLister(factory informers.SharedInformerFactory, plugin kinds.Plu
 	return rl, nil
 }
 
-// Start runs the factory and blocks until this kind's informer cache is
-// synced — or SyncTimeout elapses. Same semantics as PodLister.Start.
+// Start runs the factory and blocks until this kind's informer cache
+// is synced — or SyncTimeout elapses.
 func (rl *ResourceLister) Start(ctx context.Context) error {
 	rl.factory.Start(ctx.Done())
 

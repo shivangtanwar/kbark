@@ -9,13 +9,6 @@ import (
 	"github.com/shivangtanwar/kbark/internal/diagnose"
 )
 
-// PodsUpdatedMsg carries a fresh namespace-scoped pod snapshot from the
-// informer. The slice is sorted by name and is the *full* current state,
-// not a diff — the model replaces its data each time.
-type PodsUpdatedMsg struct {
-	Pods []*corev1.Pod
-}
-
 // NamespaceChangedMsg fires when the user selects a new namespace via
 // the command bar. The TUI rebinds its informer to the new namespace.
 type NamespaceChangedMsg struct {
@@ -32,11 +25,10 @@ type LogsBatchMsg struct {
 // stream's context cancelled). The view stops issuing waitForLogs Cmds.
 type LogsEndMsg struct{}
 
-// ResourceSnapshotMsg carries a fresh snapshot for a non-pod resource
-// kind (e.g. deployments, services). Pods continue to use the typed
-// PodsUpdatedMsg path because the diagnose `?` flow needs typed
-// *corev1.Pod access — splitting at this seam lets new kinds land
-// without disturbing the pod path.
+// ResourceSnapshotMsg carries a fresh snapshot for the active
+// resource kind. Pods are no longer special — they flow through this
+// same path as every other kind, and the diagnose `?` flow recovers
+// typed *corev1.Pod via SelectedObject() + type assertion.
 type ResourceSnapshotMsg struct {
 	Kind    string
 	Objects []runtime.Object

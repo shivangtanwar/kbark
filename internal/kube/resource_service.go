@@ -13,10 +13,10 @@ import (
 	"github.com/shivangtanwar/kbark/internal/kube/kinds"
 )
 
-// ResourceService is the kind-generic counterpart of PodService. It owns
-// the namespace-switch lifecycle for one kind: each Switch tears down
-// the previous lister and starts a fresh one scoped to the new namespace.
-// One instance per kind; the TUI keeps a map keyed by Plugin.Key.
+// ResourceService owns the namespace-switch lifecycle for one kind:
+// each Switch tears down the previous lister and starts a fresh one
+// scoped to the new namespace. One instance per kind; the TUI keeps
+// a map keyed by Plugin.Key.
 type ResourceService struct {
 	client kubernetes.Interface
 	resync time.Duration
@@ -44,16 +44,15 @@ func NewResourceService(client kubernetes.Interface, resync time.Duration, paren
 // view that asked for them.
 func (s *ResourceService) Kind() string { return s.plugin.Key }
 
-// Switch tears down the previous lister and starts a new one scoped to
-// `namespace`. Returns the snapshots channel, a done channel that closes
-// on the next Switch, and any startup error. Same contract as
-// PodService.Switch.
+// Switch tears down the previous lister and starts a new one scoped
+// to `namespace`. Returns the snapshots channel, a done channel that
+// closes on the next Switch, and any startup error.
 //
-// Cluster-scoped plugins (Scope == kinds.Cluster) ignore the namespace
-// argument: their informer always watches cluster-wide. This means
-// `:no` always lists every node regardless of the user's active
-// namespace, and a subsequent `:ns kube-system` doesn't touch the
-// nodes informer.
+// Cluster-scoped plugins (Scope == kinds.Cluster) ignore the
+// namespace argument: their informer always watches cluster-wide.
+// This means `:no` always lists every node regardless of the user's
+// active namespace, and a subsequent `:ns kube-system` doesn't touch
+// the nodes informer.
 func (s *ResourceService) Switch(namespace string) (<-chan []runtime.Object, <-chan struct{}, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
