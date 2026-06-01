@@ -72,6 +72,10 @@ type ModelDeps struct {
 	// Config is the full parsed config (all profiles). Used for
 	// mid-session `:profile <name>` switching. May be nil in tests.
 	Config *config.Config
+	// Theme picks the TUI palette. Pre-resolved by run.go from the
+	// active profile's `theme` field. Nil falls back to
+	// theme.Default() (the standard palette).
+	Theme *theme.Theme
 	// DescribeService powers the Enter-key modal. May be nil if no
 	// REST config could be built at startup; the modal then surfaces
 	// YAML only and shows an actionable error for the describe text.
@@ -154,6 +158,9 @@ type Model struct {
 func NewModel(deps ModelDeps) Model {
 	ctxName, ns := resolveContextAndNamespace(deps.Flags)
 	th := theme.Default()
+	if deps.Theme != nil {
+		th = *deps.Theme
+	}
 	parentCtx := deps.Ctx
 	if parentCtx == nil {
 		parentCtx = context.Background()

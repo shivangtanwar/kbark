@@ -57,6 +57,10 @@ type Profile struct {
 	// are typically a few KB and the budget is a guard, not a
 	// throttle).
 	TokenBudget int `json:"token_budget,omitempty"`
+	// Theme selects the TUI palette: "" / "default" for the
+	// standard kbark palette, "high-contrast" / "hc" for the
+	// accessibility variant. Unknown values fall back to default.
+	Theme string `json:"theme,omitempty"`
 }
 
 // TranscriptsEnabled reports whether transcripts should save under
