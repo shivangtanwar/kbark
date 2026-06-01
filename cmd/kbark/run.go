@@ -73,7 +73,6 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("build kube client: %w", err)
 	}
 
-	namespace, _, _ := kubeFlags.ToRawKubeConfigLoader().Namespace()
 	logService := kube.NewLogService(clientset, ctx)
 	podContextBuilder := diagnose.NewPodContextBuilder(clientset)
 	logContextBuilder := diagnose.NewLogContextBuilder(clientset)
@@ -122,13 +121,10 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		resourceServices[key] = kube.NewResourceService(clientset, kube.DefaultResyncInterval, ctx, p)
 	}
 
-	// Pre-Switch the home kind so the TUI's first paint shows live
-	// data instead of an empty table.
+	// Home kind is fixed for v1. The TUI starts the informer
+	// asynchronously inside Model.Init() so the first paint is
+	// instant — see M9.6.
 	const homeKind = "po"
-	homeCh, homeDone, err := resourceServices[homeKind].Switch(namespace)
-	if err != nil {
-		return fmt.Errorf("start %s informer: %w", homeKind, err)
-	}
 
 	// kubectl/describe via ConfigFlags as the RESTClientGetter.
 	// kubeFlags already implements the interface, so the modal lights
@@ -157,8 +153,6 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		KindRegistry:           registry,
 		ResourceServices:       resourceServices,
 		HomeKind:               homeKind,
-		HomeCh:                 homeCh,
-		HomeDone:               homeDone,
 	})
 
 	p := tea.NewProgram(

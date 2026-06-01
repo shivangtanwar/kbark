@@ -220,10 +220,34 @@ func NewModel(deps ModelDeps) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	if m.resourceCh == nil {
+	// Two startup shapes:
+	//
+	//  1. Pre-wired (legacy / tests): resourceCh already populated by
+	//     run.go's synchronous Switch. Start pumping immediately.
+	//  2. Lazy (current production path): no channels yet. Fire an
+	//     async Cmd that Switches the home kind off the bubbletea
+	//     main loop, then wires up via HomeReadyMsg. First paint
+	//     happens before this returns — empty headers visible
+	//     instantly even on a slow apiserver.
+	if m.resourceCh != nil {
+		return waitForResource(m.resourceCh, m.resourceDone, m.resourceKind)
+	}
+	if m.resourceServices == nil || m.homeKind == "" {
 		return nil
 	}
-	return waitForResource(m.resourceCh, m.resourceDone, m.resourceKind)
+	svc, ok := m.resourceServices[m.homeKind]
+	if !ok {
+		return nil
+	}
+	kind := m.homeKind
+	ns := m.namespace
+	return func() tea.Msg {
+		ch, done, err := svc.Switch(ns)
+		if err != nil {
+			return HomeFailedMsg{Kind: kind, Err: err}
+		}
+		return HomeReadyMsg{Kind: kind, Ch: ch, Done: done}
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -303,6 +327,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resourceCh = nil
 			m.resourceDone = nil
 		}
+		return m, nil
+
+	case HomeReadyMsg:
+		// Late binding of the home-kind pump. Ignore if the user
+		// already navigated to a different kind before the async
+		// Switch returned.
+		if msg.Kind != m.resourceKind {
+			return m, nil
+		}
+		m.resourceCh = msg.Ch
+		m.resourceDone = msg.Done
+		return m, waitForResource(m.resourceCh, m.resourceDone, m.resourceKind)
+
+	case HomeFailedMsg:
+		m.cmdbar = m.cmdbar.Activate().SetError("home informer failed: " + msg.Err.Error())
 		return m, nil
 
 	case DescribeReadyMsg:
