@@ -45,6 +45,30 @@ checksum:
   name_template: "SHA256SUMS"
   algorithm: sha256
 
+# Sign SHA256SUMS keylessly via cosign + the GitHub OIDC token. No
+# long-lived signing key to manage; users verify with:
+#
+#   cosign verify-blob \
+#     --certificate-identity-regexp 'https://github.com/shivangtanwar/kbark/.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     --signature SHA256SUMS.sig --certificate SHA256SUMS.pem SHA256SUMS
+#
+# Skipped on snapshot builds: no OIDC token outside CI. Cosign must
+# be on PATH; the release workflow installs it via
+# sigstore/cosign-installer.
+signs:
+  - id: checksums
+    artifacts: checksum
+    cmd: cosign
+    args:
+      - "sign-blob"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "--yes"
+      - "${artifact}"
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+
 snapshot:
   version_template: "{{ incpatch .Version }}-dev"
 
@@ -58,14 +82,41 @@ changelog:
       - "^ci:"
       - "^test:"
 
-# Brew tap and Scoop bucket wiring is added in M10.
-# brews:
-#   - name: kbark
-#     repository:
-#       owner: shivangtanwar
-#       name: homebrew-tap
-# scoops:
-#   - name: kbark
-#     repository:
-#       owner: shivangtanwar
-#       name: scoop-bucket
+homebrew_casks:
+  - name: kbark
+    # The tap repo (github.com/shivangtanwar/homebrew-tap) must exist
+    # before `goreleaser release` succeeds on a real tag. Snapshot
+    # builds (`task release-snapshot`) skip this block automatically
+    # via goreleaser's snapshot detection.
+    #
+    # Note: goreleaser v2 deprecated the old `brews:` block (CLI
+    # formula) in favor of `homebrew_casks:` for all binary releases.
+    # The generated cask installs to /opt/homebrew/bin via Homebrew's
+    # cask mechanism, which works identically to a formula for CLI
+    # tools while letting goreleaser sidestep the formula-vs-cask
+    # complexity around binary signing.
+    repository:
+      owner: shivangtanwar
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN | default .Env.GITHUB_TOKEN }}"
+    homepage: "https://kbark.dev"
+    description: "Kubernetes terminal UI with an AI on the ? key"
+    commit_author:
+      name: kbark-bot
+      email: noreply@kbark.dev
+
+scoops:
+  - name: kbark
+    # The bucket repo (github.com/shivangtanwar/scoop-bucket) must
+    # exist before a real release succeeds. Same snapshot-skip behavior
+    # as the brew block.
+    repository:
+      owner: shivangtanwar
+      name: scoop-bucket
+      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN | default .Env.GITHUB_TOKEN }}"
+    homepage: "https://kbark.dev"
+    description: "Kubernetes terminal UI with an AI on the ? key"
+    license: Apache-2.0
+    commit_author:
+      name: kbark-bot
+      email: noreply@kbark.dev

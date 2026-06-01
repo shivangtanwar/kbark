@@ -1,0 +1,63 @@
+name: release
+
+# Triggered by a `v*` tag (v0.1.0, v1.2.3). Pushing such a tag is the
+# release control plane — everything that follows is automated:
+#
+#   1. Build cross-platform binaries (linux/macOS/windows × amd64/arm64)
+#   2. Compute SHA256SUMS over every artifact
+#   3. Optionally sign SHA256SUMS via cosign (keyless, OIDC)
+#   4. Publish the GitHub Release with all artifacts attached
+#   5. Update the homebrew-tap formula
+#   6. Update the scoop-bucket manifest
+#
+# Prerequisites that must be set up before the first release:
+#   - GitHub repos at shivangtanwar/homebrew-tap and
+#     shivangtanwar/scoop-bucket (empty is fine; goreleaser creates
+#     the formula / manifest files on first publish)
+#   - A PAT in this repo's secrets named HOMEBREW_TAP_GITHUB_TOKEN
+#     with `contents: write` on shivangtanwar/homebrew-tap (and
+#     SCOOP_BUCKET_GITHUB_TOKEN for scoop-bucket). The default
+#     GITHUB_TOKEN can't write to other repos, so a PAT is required.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # cut the GitHub Release
+  id-token: write   # cosign keyless signing via OIDC
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # goreleaser needs full history for changelog
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # cosign is used to sign SHA256SUMS keylessly via the GitHub
+      # OIDC token. No long-lived signing key to manage; users
+      # verify with `cosign verify-blob --certificate-identity-regexp`.
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          SCOOP_BUCKET_GITHUB_TOKEN: ${{ secrets.SCOOP_BUCKET_GITHUB_TOKEN }}
