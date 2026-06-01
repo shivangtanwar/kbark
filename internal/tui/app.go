@@ -49,15 +49,16 @@ const (
 // ModelDeps bundles everything the root Model needs at construction time.
 // Fields may be nil for tests that don't exercise the data path.
 type ModelDeps struct {
-	Ctx               context.Context
-	Flags             *genericclioptions.ConfigFlags
-	Profile           string
-	LogService        *kube.LogService
-	PodContextBuilder *diagnose.PodContextBuilder
-	LogContextBuilder *diagnose.LogContextBuilder
-	ToolDispatcher    *diagnose.Dispatcher
-	AIProvider        ai.Provider
-	AIModel           string
+	Ctx                    context.Context
+	Flags                  *genericclioptions.ConfigFlags
+	Profile                string
+	LogService             *kube.LogService
+	PodContextBuilder      *diagnose.PodContextBuilder
+	LogContextBuilder      *diagnose.LogContextBuilder
+	ResourceContextBuilder *diagnose.ResourceContextBuilder
+	ToolDispatcher         *diagnose.Dispatcher
+	AIProvider             ai.Provider
+	AIModel                string
 	// DescribeService powers the Enter-key modal. May be nil if no
 	// REST config could be built at startup; the modal then surfaces
 	// YAML only and shows an actionable error for the describe text.
@@ -102,13 +103,14 @@ type Model struct {
 	describeView   views.DescribeView
 	cmdbar         components.Cmdbar
 
-	logService      *kube.LogService
-	podContextBldr  *diagnose.PodContextBuilder
-	logContextBldr  *diagnose.LogContextBuilder
-	toolDispatcher  *diagnose.Dispatcher
-	aiProvider      ai.Provider
-	aiModel         string
-	describeService *describe.Service
+	logService          *kube.LogService
+	podContextBldr      *diagnose.PodContextBuilder
+	logContextBldr      *diagnose.LogContextBuilder
+	resourceContextBldr *diagnose.ResourceContextBuilder
+	toolDispatcher      *diagnose.Dispatcher
+	aiProvider          ai.Provider
+	aiModel             string
+	describeService     *describe.Service
 
 	logsCh           <-chan []string
 	logsDone         <-chan struct{}
@@ -143,33 +145,34 @@ func NewModel(deps ModelDeps) Model {
 	}
 
 	m := Model{
-		ctx:              parentCtx,
-		flags:            deps.Flags,
-		profile:          deps.Profile,
-		mode:             "RO",
-		contextName:      ctxName,
-		namespace:        ns,
-		active:           ViewResource,
-		logsView:         views.NewLogsView(th),
-		diagnoseView:     views.NewDiagnoseView(th),
-		describeView:     views.NewDescribeView(th),
-		cmdbar:           components.NewCmdbar(th),
-		logService:       deps.LogService,
-		podContextBldr:   deps.PodContextBuilder,
-		logContextBldr:   deps.LogContextBuilder,
-		toolDispatcher:   deps.ToolDispatcher,
-		aiProvider:       deps.AIProvider,
-		aiModel:          deps.AIModel,
-		describeService:  deps.DescribeService,
-		registry:         deps.KindRegistry,
-		resourceServices: deps.ResourceServices,
-		homeKind:         homeKind,
-		resourceKind:     homeKind,
-		resourceCh:       deps.HomeCh,
-		resourceDone:     deps.HomeDone,
-		footer:           components.NewFooter(th),
-		keys:             DefaultKeyMap(),
-		th:               th,
+		ctx:                 parentCtx,
+		flags:               deps.Flags,
+		profile:             deps.Profile,
+		mode:                "RO",
+		contextName:         ctxName,
+		namespace:           ns,
+		active:              ViewResource,
+		logsView:            views.NewLogsView(th),
+		diagnoseView:        views.NewDiagnoseView(th),
+		describeView:        views.NewDescribeView(th),
+		cmdbar:              components.NewCmdbar(th),
+		logService:          deps.LogService,
+		podContextBldr:      deps.PodContextBuilder,
+		logContextBldr:      deps.LogContextBuilder,
+		resourceContextBldr: deps.ResourceContextBuilder,
+		toolDispatcher:      deps.ToolDispatcher,
+		aiProvider:          deps.AIProvider,
+		aiModel:             deps.AIModel,
+		describeService:     deps.DescribeService,
+		registry:            deps.KindRegistry,
+		resourceServices:    deps.ResourceServices,
+		homeKind:            homeKind,
+		resourceKind:        homeKind,
+		resourceCh:          deps.HomeCh,
+		resourceDone:        deps.HomeDone,
+		footer:              components.NewFooter(th),
+		keys:                DefaultKeyMap(),
+		th:                  th,
 	}
 	// Mount the home view if we know the plugin. Lazy fallback if
 	// registry was never wired (tests).
@@ -307,16 +310,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m.switchToHome()
 		}
-		// Pod-specific keys are gated on the pod kind. M7 will
-		// generalise `?` (and possibly `l`) to other kinds via the
-		// kind-aware context builders.
-		if m.resourceKind == "po" {
-			switch msg.String() {
-			case "l":
-				return m.openLogs()
-			case "?":
+		// `?` works on every kind. The pod kind uses the tuned pod
+		// builder + pod system prompt (which can include a log tail
+		// describe doesn't surface); other kinds use the generic
+		// ResourceContextBuilder + ResourceSystemPrompt.
+		if msg.String() == "?" {
+			if m.resourceKind == "po" {
 				return m.openDiagnose()
 			}
+			return m.openDiagnoseForResource()
+		}
+		// `l` (logs) is still pod-only — there's no equivalent stream
+		// for non-pod kinds (we could route deployments → first pod's
+		// logs in a future polish, but that's not v1 scope).
+		if m.resourceKind == "po" && msg.String() == "l" {
+			return m.openLogs()
 		}
 		var cmd tea.Cmd
 		m.resourceView, cmd = m.resourceView.Update(msg)
@@ -575,6 +583,53 @@ func (m Model) switchToHome() (Model, tea.Cmd) {
 	return m.switchToResource(p)
 }
 
+// openDiagnoseForResource is the `?` handler for non-pod kinds.
+// Pulls the selected object from the resource view, looks up its
+// plugin in the registry, and runs the diagnose flow with the
+// generic ResourceContextBuilder + ResourceSystemPrompt. Pods stay
+// on the tuned openDiagnose path because they get a log tail that
+// kubectl/describe doesn't include.
+func (m Model) openDiagnoseForResource() (Model, tea.Cmd) {
+	if m.resourceView == nil || m.registry == nil {
+		return m, nil
+	}
+	obj := m.resourceView.SelectedObject()
+	if obj == nil {
+		return m, nil
+	}
+	plugin, ok := m.registry.Lookup(m.resourceKind)
+	if !ok {
+		return m, nil
+	}
+	accessor, err := meta.Accessor(obj)
+	if err != nil {
+		return m, nil
+	}
+	namespace := accessor.GetNamespace()
+	name := accessor.GetName()
+
+	title := fmt.Sprintf("%s/%s · %s", namespace, name, plugin.Kind)
+	if namespace == "" {
+		title = fmt.Sprintf("%s · %s", name, plugin.Kind)
+	}
+
+	m.diagnoseOrigin = ViewResource
+	m.active = ViewDiagnose
+	m.diagnoseView = m.diagnoseView.Reset()
+	m.diagnoseView = m.diagnoseView.SetTitle(title)
+	m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+
+	if m.aiProvider == nil || m.resourceContextBldr == nil {
+		err := errors.New("AI not configured (set ANTHROPIC_API_KEY and restart)")
+		m.diagnoseView = m.diagnoseView.MarkError(err)
+		m.diagnoseView = m.diagnoseView.SetSize(m.width, m.contentHeight())
+		return m, nil
+	}
+
+	return m, startResourceDiagnosis(m.ctx, m.resourceContextBldr, m.toolDispatcher,
+		m.aiProvider, m.aiModel, plugin, obj)
+}
+
 // openDescribeForResource is the Enter handler on ViewResource.
 // Works for every kind including pods (post-refactor pods are just
 // another kind).
@@ -708,7 +763,7 @@ func (m Model) helpForView() string {
 		if m.resourceKind == "po" {
 			return "l logs · ↵ describe · ? AI · q quit · : cmd"
 		}
-		return "esc back · ↵ describe · q quit · : cmd"
+		return "esc back · ↵ describe · ? AI · q quit · : cmd"
 	}
 	return ""
 }
@@ -722,6 +777,27 @@ func (m Model) contentHeight() int {
 		return 0
 	}
 	return h
+}
+
+// startResourceDiagnosis is the kind-generic counterpart to
+// startDiagnosis. Builds the payload via the resource context builder
+// and starts a session with ResourceSystemPrompt. Same Cmd-then-msg
+// shape so the existing pumping logic just works.
+func startResourceDiagnosis(
+	ctx context.Context,
+	builder *diagnose.ResourceContextBuilder,
+	dispatcher *diagnose.Dispatcher,
+	provider ai.Provider,
+	model string,
+	plugin kinds.Plugin,
+	obj runtime.Object,
+) tea.Cmd {
+	return func() tea.Msg {
+		payload := builder.Build(ctx, plugin, obj)
+		session := diagnose.StartWithPrompt(ctx, provider, model, payload, diagnose.ResourceSystemPrompt, dispatcher)
+		// Pod field stays nil — non-pod flow.
+		return DiagnosisStartedMsg{Session: session}
+	}
 }
 
 // startLogDiagnosis is the log-focused counterpart to startDiagnosis.

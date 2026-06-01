@@ -55,6 +55,8 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	logService := kube.NewLogService(clientset, ctx)
 	podContextBuilder := diagnose.NewPodContextBuilder(clientset)
 	logContextBuilder := diagnose.NewLogContextBuilder(clientset)
+	// resourceContextBuilder wraps describeService (built later) — set
+	// after that line.
 
 	// Dynamic client powers the get_resource tool. If the rest config
 	// build fails for some reason, the dispatcher gracefully reports a
@@ -111,22 +113,27 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	// up with no extra wiring.
 	describeService := describe.NewService(kubeFlags)
 
+	// `?`-on-non-pod payload builder. Shares describeService so the
+	// AI flow sees the same kubectl-style output the modal does.
+	resourceContextBuilder := diagnose.NewResourceContextBuilder(describeService)
+
 	model := tui.NewModel(tui.ModelDeps{
-		Ctx:               ctx,
-		Flags:             kubeFlags,
-		Profile:           profileFlag,
-		LogService:        logService,
-		PodContextBuilder: podContextBuilder,
-		LogContextBuilder: logContextBuilder,
-		ToolDispatcher:    dispatcher,
-		AIProvider:        aiProvider,
-		AIModel:           defaultAIModel,
-		DescribeService:   describeService,
-		KindRegistry:      registry,
-		ResourceServices:  resourceServices,
-		HomeKind:          homeKind,
-		HomeCh:            homeCh,
-		HomeDone:          homeDone,
+		Ctx:                    ctx,
+		Flags:                  kubeFlags,
+		Profile:                profileFlag,
+		LogService:             logService,
+		PodContextBuilder:      podContextBuilder,
+		LogContextBuilder:      logContextBuilder,
+		ResourceContextBuilder: resourceContextBuilder,
+		ToolDispatcher:         dispatcher,
+		AIProvider:             aiProvider,
+		AIModel:                defaultAIModel,
+		DescribeService:        describeService,
+		KindRegistry:           registry,
+		ResourceServices:       resourceServices,
+		HomeKind:               homeKind,
+		HomeCh:                 homeCh,
+		HomeDone:               homeDone,
 	})
 
 	p := tea.NewProgram(
