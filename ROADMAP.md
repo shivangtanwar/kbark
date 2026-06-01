@@ -1,19 +1,56 @@
 # Roadmap
 
-kbark is on a tight, opinionated v1. This file lists only the **next three milestones**. Anything beyond M2 is intentionally not promised.
+kbark is a Kubernetes terminal UI in the spirit of k9s, with one
+new key: **`?`** opens an inline AI diagnosis. The v0.1 line is
+the first publicly tagged release.
 
-## M0 — Skeleton & kubeconfig (in progress)
+## What v0.1 ships
 
-A `kbark` binary that loads `~/.kube/config`, dials the cluster, and reports green from `kbark doctor` against minikube, kind, and a real EKS context. No TUI yet.
+- Live resource tables for pods, deployments, statefulsets,
+  daemonsets, services, jobs, cronjobs, nodes, events, configmaps,
+  secrets, and ingresses
+- Read-only describe + YAML modal on `Enter` (managed-fields stripped)
+- Tool-using AI diagnosis on **`?`** against Anthropic, OpenAI, or
+  Ollama — the model can pull additional logs, events, and previous
+  container output mid-session
+- Line-local secret redaction before any byte leaves for an AI
+  provider, with no-leak tests pinning the contract
+- Per-diagnosis Markdown transcripts in `~/.cache/kbark/diagnoses/`
+- Profile system with mid-session switch (`:profile <name>`)
+- Cosign-signed releases via GitHub OIDC; install paths for
+  Homebrew, Scoop, and `go install`
+- envtest E2E coverage of the kube layer
 
-## M1 — Pod table view
+## What's coming next
 
-A live-updating bubbletea table of pods in the current namespace, with arrow-key navigation and a namespace switcher. Kill a pod in another terminal, the row updates within 2 seconds. CPU under 5% idle on a 200-pod cluster.
+These are the directions the project is heading. **None are
+promised, none are dated.** Open an issue to discuss any of them.
 
-## M2 — Resource roster
+- **Log viewer with diagnose** — `?` on a log line that pulls
+  the surrounding window (not just the line) into the diagnosis
+- **Action mode** — restart, scale, exec, etc., behind explicit
+  per-action confirmation. Read-only is the v1 contract; writes
+  get their own trust model
+- **More providers** — Azure OpenAI, Amazon Bedrock, Google Vertex
+- **Per-namespace defaults** — pin a profile to a namespace
+  via config
+- **Krew distribution** — once kbark has enough adoption that
+  shipping as a kubectl plugin doesn't undermine the "the new k9s"
+  framing
 
-Same uniform keymap for deployments, services, statefulsets, daemonsets, jobs, cronjobs, nodes, events, configmaps, secrets, ingresses. `Enter` opens a read-only describe + YAML modal.
+## What kbark deliberately won't do
 
-## What's intentionally not on this list
+- **Background telemetry.** Never. Your kubeconfig, cluster
+  state, and AI prompts stay on your machine
+- **Multi-cluster federation.** kbark is one terminal, one
+  cluster, one context. Switch contexts via `--context` or
+  `kubectl config use-context`
+- **A managed service.** kbark is a CLI, not a SaaS
 
-The `?` AI diagnosis modal, log viewer, transcripts, profiles, distribution, demo, and launch. They are tracked privately and will be promoted to this roadmap as each prior milestone closes. If you need to know whether a feature is planned, open an issue rather than guessing.
+## How decisions get made
+
+kbark is a single-maintainer project. Feature proposals land in
+GitHub Issues — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+proposal template. Items in "What's coming next" are open for
+discussion; items in "What kbark deliberately won't do" are
+closed-by-default. Challenge any of these calls in an issue.
