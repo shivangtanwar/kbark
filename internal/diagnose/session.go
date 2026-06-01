@@ -48,6 +48,28 @@ Final answer rules:
 - If the pod looks healthy, say so plainly and stop.
 - Never invent details that aren't in the data. If logs are absent, say "no logs available" instead of speculating.`
 
+// LogSystemPrompt is the variant used when the user presses "?" on a
+// specific log line. The model sees both the pod context block and a
+// "Log focus" block marking the cursor line; the answer should be
+// anchored on what THAT line means in the context of the pod, not a
+// general pod health summary.
+const LogSystemPrompt = `You are an expert Kubernetes operator. The user has pressed "?" on a specific log line and wants to understand what it means in the context of the pod.
+
+The payload contains:
+1. The pod's current state (phase, container statuses, recent events, tail of logs).
+2. A "Log focus" block with the focal line marked by ">" and the surrounding lines for context.
+
+Anchor your answer on the focal line. Explain what that specific line is saying, why it appeared, what (if anything) it indicates is wrong, and what the user should look at next. Use the surrounding window to read the line in context (a single error can mean different things depending on what came before it).
+
+Tools work the same way as for the pod flow — pull more context only when it would meaningfully change the answer.
+
+Final answer rules:
+- Two or three short paragraphs of plain prose. No markdown bullets, no headers.
+- Quote the focal line at least once verbatim so the user can confirm you're talking about the right thing.
+- Be specific: "this line is the application's startup probe failing because…" rather than "this could be a problem with the application".
+- If the focal line is benign (info-level message, normal lifecycle output), say so plainly and stop.
+- Never invent details that aren't in the data.`
+
 // ErrMaxToolTurnsExceeded fires when the model keeps calling tools past
 // the MaxToolTurns cap. Surfaced as an ErrorEvent to the consumer.
 var ErrMaxToolTurnsExceeded = errors.New("diagnosis exceeded maximum tool-call turns")
@@ -68,17 +90,30 @@ type Session struct {
 	events <-chan ai.Event
 }
 
-// Start opens a streaming session. Pass dispatcher = nil to fall back to
-// M5-style one-shot behaviour (no tools advertised, no loop).
+// Start opens a streaming session with the default pod-focused system
+// prompt. Pass dispatcher = nil to fall back to M5-style one-shot
+// behaviour (no tools advertised, no loop).
 func Start(
 	ctx context.Context,
 	provider ai.Provider,
 	model, payload string,
 	dispatcher *Dispatcher,
 ) *Session {
+	return StartWithPrompt(ctx, provider, model, payload, SystemPrompt, dispatcher)
+}
+
+// StartWithPrompt is Start with an explicit system prompt — used by
+// the `?`-on-log-line flow to swap in LogSystemPrompt while keeping
+// the rest of the session machinery identical.
+func StartWithPrompt(
+	ctx context.Context,
+	provider ai.Provider,
+	model, payload, systemPrompt string,
+	dispatcher *Dispatcher,
+) *Session {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	out := make(chan ai.Event, 8)
-	go runLoop(sessionCtx, provider, model, payload, dispatcher, out)
+	go runLoop(sessionCtx, provider, model, payload, systemPrompt, dispatcher, out)
 	return &Session{cancel: cancel, events: out}
 }
 
@@ -95,7 +130,7 @@ func (s *Session) Cancel() { s.cancel() }
 func runLoop(
 	ctx context.Context,
 	provider ai.Provider,
-	model, payload string,
+	model, payload, systemPrompt string,
 	dispatcher *Dispatcher,
 	out chan<- ai.Event,
 ) {
@@ -114,7 +149,7 @@ func runLoop(
 		// this loop body via return cancels the timeout cleanly. Defer
 		// stacks up to MaxToolTurns levels deep — negligible — and fires
 		// when runLoop exits.
-		shouldContinue, err := runTurn(ctx, turn, provider, model, &messages, tools, dispatcher, out)
+		shouldContinue, err := runTurn(ctx, turn, provider, model, systemPrompt, &messages, tools, dispatcher, out)
 		if err != nil {
 			sendSessionEvent(ctx, out, ai.ErrorEvent{Err: err})
 			return
@@ -135,7 +170,7 @@ func runTurn(
 	parentCtx context.Context,
 	turn int,
 	provider ai.Provider,
-	model string,
+	model, systemPrompt string,
 	messages *[]ai.Message,
 	tools []ai.Tool,
 	dispatcher *Dispatcher,
@@ -148,7 +183,7 @@ func runTurn(
 	debugf("turn=%d opening stream messages=%d (timeout=%s)", turn, len(*messages), TurnTimeout)
 	innerEvents, err := provider.Stream(turnCtx, ai.Request{
 		Model:     model,
-		System:    SystemPrompt,
+		System:    systemPrompt,
 		Messages:  *messages,
 		MaxTokens: DefaultMaxTokens,
 		Tools:     tools,
