@@ -194,3 +194,94 @@ Events:
 		t.Errorf("non-secret text was modified.\nin:  %q\nout: %q", in, out)
 	}
 }
+
+// TestRedact_multipleSecretsOnSameLine pins the no-leak contract
+// when several credentials share a line (common in env-var dumps).
+// All credential values must be scrubbed.
+//
+// Known limitation documented here: the inline matcher's value
+// class includes spaces (needed for `Authorization: Bearer <token>`),
+// so a line like `DB_PASSWORD=hunter2 API_TOKEN=ya29.abc OTHER=safe`
+// gets redacted from `DB_PASSWORD=` to end-of-line — taking the
+// trailing non-secret OTHER=safe with it. The trade-off is
+// deliberate: over-redacting non-secrets is recoverable (the model
+// just doesn't see one value); under-redacting a secret is not.
+func TestRedact_multipleSecretsOnSameLine(t *testing.T) {
+	in := `DB_PASSWORD=hunter2 API_TOKEN=ya29.abc OTHER=safe`
+	out := redact.Redact(in)
+	for _, leaked := range []string{"hunter2", "ya29.abc"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("value %q leaked through redaction:\n%s", leaked, out)
+		}
+	}
+	if !strings.Contains(out, redact.Placeholder) {
+		t.Errorf("placeholder missing:\n%s", out)
+	}
+}
+
+// TestRedact_tabSeparator pins that whitespace-separated formats
+// (tab instead of space) still trigger redaction.
+func TestRedact_tabSeparator(t *testing.T) {
+	in := "password:\thunter2"
+	out := redact.Redact(in)
+	if strings.Contains(out, "hunter2") {
+		t.Errorf("value leaked with tab separator:\n%s", out)
+	}
+	if !strings.Contains(out, redact.Placeholder) {
+		t.Errorf("placeholder missing:\n%s", out)
+	}
+}
+
+// TestRedact_caseVariations pins case-insensitivity across all
+// shapes — Password, PASSWORD, password should all match.
+func TestRedact_caseVariations(t *testing.T) {
+	for _, in := range []string{
+		"Password: hunter2",
+		"PASSWORD: hunter2",
+		"password: hunter2",
+		"PaSsWoRd: hunter2",
+	} {
+		out := redact.Redact(in)
+		if strings.Contains(out, "hunter2") {
+			t.Errorf("case variant leaked: in=%q out=%q", in, out)
+		}
+	}
+}
+
+// TestRedact_secretValueContainingNumbersAndSymbols pins the value
+// class — credential strings often have ., -, /, +, =, _, : in
+// them (base64 padding, JWT segments). The regex must capture
+// through these chars.
+func TestRedact_secretValueContainingNumbersAndSymbols(t *testing.T) {
+	in := `token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0=.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c`
+	out := redact.Redact(in)
+	if strings.Contains(out, "eyJhbGciOiJIUzI1NiJ9") {
+		t.Errorf("JWT prefix leaked:\n%s", out)
+	}
+	if !strings.Contains(out, "<redacted>") {
+		t.Errorf("placeholder missing:\n%s", out)
+	}
+}
+
+// TestRedact_secretMixedWithLegitContent pins the contract that
+// redaction is line-local: scrubbing a password value on one line
+// doesn't disturb non-secret content on adjacent lines. Catches
+// regressions where a greedy regex would eat past a `\n`.
+func TestRedact_secretMixedWithLegitContent(t *testing.T) {
+	in := `Name:       my-app
+Namespace:  default
+Env:
+  DB_PASSWORD=hunter2
+  LOG_LEVEL=info
+  RETRY_COUNT=5
+Status: Running`
+	out := redact.Redact(in)
+	if strings.Contains(out, "hunter2") {
+		t.Errorf("password leaked:\n%s", out)
+	}
+	for _, want := range []string{"my-app", "LOG_LEVEL=info", "RETRY_COUNT=5", "Status: Running"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("legitimate content lost: missing %q in:\n%s", want, out)
+		}
+	}
+}
