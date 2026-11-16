@@ -1,0 +1,122 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* kbark console design tokens.
+   Dark is the default; light is a full second theme, not an inversion.
+   One accent (blue) for actions and selection. Status colours are
+   reserved for state and always ship with a shape and a label. */
+
+:root {
+  color-scheme: dark;
+  --bg: #090c12;
+  --side: #0c1017;
+  --card: #10151e;
+  --raise: #161c28;
+  --line: #1e2633;
+  --line-2: #2b3545;
+  --fg: #e8ecf3;
+  --fg-2: #a4aec0;
+  --fg-3: #6e798c;
+  --accent: #5b8cff;
+  --accent-fg: #06101f;
+  --accent-soft: rgb(91 140 255 / 0.14);
+  --ok: #3ccf91;
+  --ok-soft: rgb(60 207 145 / 0.13);
+  --warn: #f2b84b;
+  --warn-soft: rgb(242 184 75 / 0.13);
+  --bad: #f2616b;
+  --bad-soft: rgb(242 97 107 / 0.14);
+  --person: #a995ff;
+  --person-soft: rgb(169 149 255 / 0.14);
+  --idle: #8a95a8;
+  --idle-soft: rgb(138 149 168 / 0.13);
+  --code: #0a0e15;
+  --shadow: 0 12px 40px rgb(0 0 0 / 0.55);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f6f8;
+  --side: #ffffff;
+  --card: #ffffff;
+  --raise: #f1f3f6;
+  --line: #e3e6ec;
+  --line-2: #cfd4dd;
+  --fg: #101623;
+  --fg-2: #4b5567;
+  --fg-3: #7a8496;
+  --accent: #2f5fe0;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(47 95 224 / 0.1);
+  --ok: #128a57;
+  --ok-soft: rgb(18 138 87 / 0.1);
+  --warn: #a96a00;
+  --warn-soft: rgb(169 106 0 / 0.1);
+  --bad: #cc3340;
+  --bad-soft: rgb(204 51 64 / 0.09);
+  --person: #6a4fd6;
+  --person-soft: rgb(106 79 214 / 0.09);
+  --idle: #667085;
+  --idle-soft: rgb(102 112 133 / 0.1);
+  --code: #f7f8fa;
+  --shadow: 0 12px 40px rgb(16 22 35 / 0.14);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-side: var(--side);
+  --color-card: var(--card);
+  --color-raise: var(--raise);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-fg-3: var(--fg-3);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-person: var(--person);
+  --color-person-soft: var(--person-soft);
+  --color-idle: var(--idle);
+  --color-idle-soft: var(--idle-soft);
+  --color-code: var(--code);
+  --font-sans: "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, Menlo, Consolas, monospace;
+  --shadow-pop: var(--shadow);
+}
+
+html, body, #root { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.5;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.num { font-variant-numeric: tabular-nums; }
+::selection { background: var(--accent-soft); }
+
+/* Recharts draws its own focus rectangle on click; the chart is not a control. */
+.recharts-wrapper:focus, .recharts-surface:focus { outline: none; }
+
+@keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes pop { from { opacity: 0; transform: scale(0.98) translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes shimmer { 100% { transform: translateX(100%); } }
+@media (prefers-reduced-motion: no-preference) {
+  .anim-rise { animation: rise 0.22s ease-out both; }
+  .anim-pop { animation: pop 0.16s ease-out both; }
+}
+.skeleton { position: relative; overflow: hidden; background: var(--raise); border-radius: 8px; }
+@media (prefers-reduced-motion: no-preference) {
+  .skeleton::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, var(--line), transparent); animation: shimmer 1.4s infinite; }
+}
