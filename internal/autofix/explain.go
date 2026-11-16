@@ -150,6 +150,14 @@ func Payload(ctx context.Context, c *fleet.Cluster, inc *incident.Incident) stri
 	switch {
 	case inc.Action != nil:
 		fmt.Fprintf(&b, "\nProposed fix (awaiting human approval): %s\nkbark's rationale: %s\n", inc.Action.Title, inc.Action.Rationale)
+		// The exact change, so the explanation describes what will
+		// really be applied rather than guessing from the title.
+		if diff := inc.Action.Diff; diff != "" {
+			if len(diff) > 2500 {
+				diff = diff[:2500] + "\n(truncated)"
+			}
+			fmt.Fprintf(&b, "\nThe exact change, as a diff:\n<cluster-data>\n%s</cluster-data>\n", diff)
+		}
 	case inc.ManualReason != "":
 		fmt.Fprintf(&b, "\nNo automated fix is proposed. kbark's reason: %s\n", inc.ManualReason)
 	}

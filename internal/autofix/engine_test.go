@@ -267,7 +267,7 @@ func TestExplanationIsAdvisoryAndRedacted(t *testing.T) {
 		t.Error("the explainer must not be given tools")
 	}
 	payload := req.Messages[0].Content
-	for _, want := range []string{"OOMKilled", "Memory limit: 64Mi", "Proposed fix (awaiting human approval): Raise memory limit", "<cluster-data>"} {
+	for _, want := range []string{"OOMKilled", "Memory limit: 64Mi", "Proposed fix (awaiting human approval): Raise memory limit", "<cluster-data>", "+        memory: 128Mi"} {
 		if !strings.Contains(payload, want) {
 			t.Errorf("payload lacks %q:\n%s", want, payload)
 		}
