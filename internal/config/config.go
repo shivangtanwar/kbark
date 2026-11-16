@@ -46,6 +46,14 @@ type Profile struct {
 	// Model is the provider-specific model identifier (e.g.
 	// "claude-sonnet-4-6", "gpt-4o-mini", "llama3.2").
 	Model string `json:"model"`
+	// BaseURL points the openai provider at an OpenAI-compatible
+	// endpoint (LiteLLM, a local proxy, a gateway), for example
+	// "http://127.0.0.1:4000/v1". Empty means api.openai.com.
+	BaseURL string `json:"base_url,omitempty"`
+	// APIKeyEnv names the environment variable holding the API key
+	// for this profile. Empty means the provider's default
+	// (OPENAI_API_KEY). The key itself is never stored in the config.
+	APIKeyEnv string `json:"api_key_env,omitempty"`
 	// Transcripts toggles diagnosis transcript saving. Accepted
 	// values: "on" (default), "off". The env var KBARK_TRANSCRIPTS
 	// still takes precedence at runtime.

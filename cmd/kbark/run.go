@@ -94,7 +94,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	// aren't set for that provider we let the TUI start and surface
 	// the configuration error inside the diagnose modal on first `?`.
 	var aiProvider ai.Provider
-	if p, err := ai.New(profile.Provider); err == nil {
+	if p, err := ai.NewEndpoint(ai.Endpoint{Provider: profile.Provider, BaseURL: profile.BaseURL, APIKeyEnv: profile.APIKeyEnv}); err == nil {
 		aiProvider = p
 	}
 

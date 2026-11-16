@@ -791,7 +791,7 @@ func (m Model) switchProfile(name string) (Model, tea.Cmd) {
 		m.cmdbar = m.cmdbar.Activate().SetError(err.Error())
 		return m, nil
 	}
-	prov, err := ai.New(p.Provider)
+	prov, err := ai.NewEndpoint(ai.Endpoint{Provider: p.Provider, BaseURL: p.BaseURL, APIKeyEnv: p.APIKeyEnv})
 	if err != nil {
 		m.cmdbar = m.cmdbar.Activate().SetError("profile " + name + ": " + err.Error())
 		return m, nil

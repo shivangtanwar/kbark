@@ -13,12 +13,19 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "kbark",
-	Short: "kbark — Kubernetes TUI with an AI on the ? key",
-	Long: `kbark is a Kubernetes terminal UI in the spirit of k9s.
+	Short: "kbark — Kubernetes failures detected, explained and fixed with approval",
+	Long: `kbark is two tools in one binary.
 
-Press ? on any pod, deployment, log line, or event to open an inline
-AI diagnosis that pulls describe, events, and logs for you and explains
-what's wrong in plain English. Read-only. Single binary. BYO key.`,
+  kbark          A terminal UI in the spirit of k9s. Press ? on any pod,
+                 deployment, log line, or event for an inline AI diagnosis.
+                 Read-only.
+
+  kbark serve    Watches every pod in one or more clusters, opens an
+                 incident for each failure, proposes a typed fix, and
+                 applies it only after a named person approves it on the
+                 dashboard.
+
+Single binary. Bring your own AI key; detection and fixes work without one.`,
 	Version:       fmt.Sprintf("%s (commit %s, built %s)", version.Version, version.Commit, version.Date),
 	SilenceErrors: true,
 	SilenceUsage:  true,

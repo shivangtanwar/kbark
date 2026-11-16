@@ -8,22 +8,41 @@ import (
 	"strings"
 
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
-// OpenAIProvider streams Chat Completions responses from api.openai.com.
-// The SDK reads the API key from OPENAI_API_KEY automatically.
+// OpenAIProvider streams Chat Completions responses from api.openai.com
+// or from any OpenAI-compatible endpoint (LiteLLM, a local proxy, a
+// gateway). The SDK reads the API key from OPENAI_API_KEY by default.
 type OpenAIProvider struct {
 	client openai.Client
+	name   string
 }
 
-func NewOpenAI() (*OpenAIProvider, error) {
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		return nil, &MissingEnvError{Provider: "openai", EnvVar: "OPENAI_API_KEY"}
+func NewOpenAI() (*OpenAIProvider, error) { return NewOpenAICompatible("", "") }
+
+// NewOpenAICompatible builds a provider against baseURL (empty means
+// api.openai.com) using the key held in the environment variable
+// keyEnv (empty means OPENAI_API_KEY). The key itself never appears in
+// kbark's config file, only the name of the variable that holds it.
+func NewOpenAICompatible(baseURL, keyEnv string) (*OpenAIProvider, error) {
+	if keyEnv == "" {
+		keyEnv = "OPENAI_API_KEY"
 	}
-	return &OpenAIProvider{client: openai.NewClient()}, nil
+	key := os.Getenv(keyEnv)
+	if key == "" {
+		return nil, &MissingEnvError{Provider: "openai", EnvVar: keyEnv}
+	}
+	opts := []option.RequestOption{option.WithAPIKey(key)}
+	name := "openai"
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+		name = "openai-compatible"
+	}
+	return &OpenAIProvider{client: openai.NewClient(opts...), name: name}, nil
 }
 
-func (p *OpenAIProvider) Name() string { return "openai" }
+func (p *OpenAIProvider) Name() string { return p.name }
 
 func (p *OpenAIProvider) Stream(ctx context.Context, req Request) (<-chan Event, error) {
 	params := openai.ChatCompletionNewParams{
