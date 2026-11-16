@@ -152,8 +152,16 @@ func (e *Engine) Restore() (int, error) {
 		}
 		// An explanation that was in flight when the process stopped
 		// will never arrive; ask again.
-		if sv.Incident.ExplanationState == incident.ExplainPending {
+		// Likewise one that failed or had no provider: this process
+		// may have a working provider, so open incidents get another try.
+		switch sv.Incident.ExplanationState {
+		case incident.ExplainPending:
 			sv.ExplainStarted = false
+		case incident.ExplainUnavailable, incident.ExplainError:
+			if sv.Incident.ClosedAt == nil && e.cfg.Explainer != nil {
+				sv.ExplainStarted = false
+				sv.Incident.ExplanationState, sv.Incident.ExplanationNote = incident.ExplainPending, ""
+			}
 		}
 		kept = append(kept, sv)
 	}

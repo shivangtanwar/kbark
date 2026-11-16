@@ -4,6 +4,6 @@ default_profile: server
 profiles:
   server:
     provider: openai
-    base_url: http://litellm:4000/v1
+    base_url: https://codex-everywhere.com/v1
     api_key_env: KBARK_AI_API_KEY
-    model: claude-sonnet-4-6
+    model: gpt-6.1-sol

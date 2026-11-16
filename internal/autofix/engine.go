@@ -44,6 +44,9 @@ type Config struct {
 	StatePath string
 	// SampleEvery is how often a trend sample is recorded.
 	SampleEvery time.Duration
+	// ReplanEvery is how often an incident with no automatic fix is
+	// planned again, in case the situation has changed.
+	ReplanEvery time.Duration
 }
 
 // DefaultProtected are the namespaces kbark never proposes changes in.
@@ -51,6 +54,10 @@ var DefaultProtected = []string{"kube-system", "kube-public", "kube-node-lease",
 
 // ErrOperatorRequired is returned when a write is requested without a name.
 var ErrOperatorRequired = errors.New("an operator name is required")
+
+// errUnchanged aborts a store update when re-planning reached the same
+// conclusion as before.
+var errUnchanged = errors.New("plan unchanged")
 
 // ErrRefreshed is returned when approval was refused because the target
 // changed; the proposal has been recomputed and needs a fresh look.
@@ -68,6 +75,8 @@ type Engine struct {
 	samples    []Sample
 	lastSample time.Time
 	lastSaved  []byte
+	// retried records when each no-fix incident was last re-planned.
+	retried map[string]time.Time
 
 	bg     context.Context
 	wg     sync.WaitGroup
@@ -98,12 +107,15 @@ func New(clusters []*fleet.Cluster, store *incident.Store, cfg Config, notify fu
 	if cfg.SampleEvery == 0 {
 		cfg.SampleEvery = 30 * time.Second
 	}
+	if cfg.ReplanEvery == 0 {
+		cfg.ReplanEvery = 30 * time.Second
+	}
 	if notify == nil {
 		notify = func() {}
 	}
 	e := &Engine{
 		cfg: cfg, store: store, clusters: map[string]*fleet.Cluster{},
-		snaps: map[string]fleet.Snapshot{}, bg: context.Background(), notify: notify,
+		snaps: map[string]fleet.Snapshot{}, retried: map[string]time.Time{}, bg: context.Background(), notify: notify,
 	}
 	for _, c := range clusters {
 		e.clusters[c.Name] = c
@@ -179,6 +191,12 @@ func (e *Engine) Tick(ctx context.Context, now time.Time) {
 			e.plan(ctx, inc.ID, "kbark")
 		case inc.State == incident.StateProposed && inc.Action != nil && remediate.Stale(c, inc.Namespace, inc.Action):
 			e.plan(ctx, inc.ID, "kbark")
+		case inc.State == incident.StateManual && e.observed(inc.Cluster, inc.Key) && e.dueForRetry(inc.ID, now):
+			// "No automatic fix" can stop being true: a workload that
+			// was mid-recreation exists again, a new revision gives a
+			// rollback target, an attempt window expires. Plan again,
+			// quietly unless the answer changes.
+			e.plan(ctx, inc.ID, "kbark")
 		case !inc.ExplainStarted && (inc.State == incident.StateProposed || inc.State == incident.StateManual):
 			e.explain(inc)
 		}
@@ -210,6 +228,24 @@ func (e *Engine) observed(cluster, key string) bool {
 		}
 	}
 	return false
+}
+
+// dueForRetry reports whether a no-fix incident should be planned
+// again now, and records the attempt.
+func (e *Engine) dueForRetry(id string, now time.Time) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	last, ok := e.retried[id]
+	if !ok {
+		// First sighting: start the clock rather than re-plan at once.
+		e.retried[id] = now
+		return false
+	}
+	if now.Sub(last) < e.cfg.ReplanEvery {
+		return false
+	}
+	e.retried[id] = now
+	return true
 }
 
 // plan computes the proposal (or the reason there is none) for an
@@ -251,8 +287,17 @@ func (e *Engine) plan(ctx context.Context, id, actor string) {
 			return "", "", "", incident.ErrWrongState
 		}
 		if p.Action != nil {
+			if i.State == incident.StateManual {
+				// The explanation was written for "no fix"; it no
+				// longer describes what is on screen.
+				i.ExplainStarted, i.Explanation, i.ExplanationState, i.ExplanationNote = false, "", incident.ExplainPending, ""
+			}
 			i.Action, i.ManualReason = p.Action, ""
 			return incident.StateProposed, actor, p.Action.Title, nil
+		}
+		if i.State == incident.StateManual && i.ManualReason == p.Manual {
+			// Nothing changed: leave the record and its history alone.
+			return "", "", "", errUnchanged
 		}
 		i.Action, i.ManualReason = nil, p.Manual
 		return incident.StateManual, actor, p.Manual, nil
