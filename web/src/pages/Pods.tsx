@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Card, Empty, Input, LinkButton, Mono, Pill, Seg, Sub, Table, Td, Th } from '../components/ui';
+import { Card, Empty, Input, LinkButton, Mono, Pill, Seg, Sub, Table, Td, Th, Skeleton } from '../components/ui';
 import { ago } from '../lib/format';
 import { useLive, useScoped } from '../lib/live';
 import type { Tone } from '../lib/vocab';
@@ -24,6 +24,8 @@ export function Pods() {
     return scoped.filter((p) => (only === 'all' || unwell(p.health)) && (!needle || `${p.name} ${p.namespace}`.toLowerCase().includes(needle)));
   }, [scoped, only, q]);
 
+  // Until the first snapshot arrives there is nothing to say about emptiness.
+  if (!state) return <Skeleton className="h-64" />;
   return (
     <>
       <div className="flex flex-wrap items-center gap-2.5">

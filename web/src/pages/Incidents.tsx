@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Empty, Input, Mono, Seg, StatePill, Sub, Table, Td, Th } from '../components/ui';
+import { Card, Empty, Input, Mono, Seg, StatePill, Sub, Table, Td, Th, Skeleton } from '../components/ui';
 import type { Incident } from '../lib/api';
 import { ago } from '../lib/format';
 import { useLive, useScoped } from '../lib/live';
@@ -24,6 +24,8 @@ export function Incidents() {
     return all.filter((i) => match(i, filter) && (!needle || `${i.id} ${workloadName(i)} ${i.namespace} ${i.cluster} ${family(i.family)}`.toLowerCase().includes(needle)));
   }, [all, filter, q]);
 
+  // Until the first snapshot arrives there is nothing to say about emptiness.
+  if (!state) return <Skeleton className="h-64" />;
   return (
     <>
       <div className="flex flex-wrap items-center gap-2.5">

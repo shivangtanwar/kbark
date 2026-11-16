@@ -182,7 +182,9 @@ func containerLogs(ctx context.Context, c *fleet.Cluster, inc *incident.Incident
 			Container: inc.Container, Previous: previous, TailLines: &tail,
 		}).Do(lctx).Raw()
 		cancel()
-		if err == nil && len(strings.TrimSpace(string(raw))) > 0 {
+		// When a container's log file is gone the kubelet answers 200
+		// with this sentence as the body; that is not a log.
+		if err == nil && len(strings.TrimSpace(string(raw))) > 0 && !strings.HasPrefix(string(raw), "unable to retrieve container logs") {
 			if len(raw) > 6000 {
 				raw = raw[len(raw)-6000:]
 			}
