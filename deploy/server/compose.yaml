@@ -1,0 +1,51 @@
+# kbark autofix console on a single server, watching Kind clusters that
+# run on the same Docker host. Set up by setup.sh; see README.md.
+#
+# The console listens on 127.0.0.1:8771 only. nginx terminates TLS for
+# the public name and proxies to it (see nginx.conf).
+services:
+  kbark:
+    image: gcr.io/distroless/static-debian12:nonroot
+    container_name: kbark
+    restart: unless-stopped
+    user: "${KBARK_UID}:${KBARK_GID}"
+    entrypoint: ["/kbark/bin/kbark"]
+    command:
+      - serve
+      - --contexts=kbark-dev,kbark-staging
+      - --addr=0.0.0.0:8765
+      - --public-url=${KBARK_PUBLIC_URL}
+      - --trust-proxy
+      - --auth-file=/kbark/users.yaml
+      - --policy=/kbark/policy.yaml
+      - --state=/kbark/data/state.json
+      - --audit-log=/kbark/data/audit.jsonl
+      - --profile=server
+    environment:
+      KUBECONFIG: /kbark/kubeconfig
+      XDG_CONFIG_HOME: /kbark/config
+    # Holds KBARK_AI_API_KEY and, optionally, KBARK_NOTIFY_WEBHOOK.
+    env_file: kbark.env
+    ports:
+      - "127.0.0.1:8771:8765"
+    volumes:
+      - ./bin:/kbark/bin:ro
+      - ./config:/kbark/config:ro
+      - ./kubeconfig:/kbark/kubeconfig:ro
+      - ./users.yaml:/kbark/users.yaml:ro
+      - ./policy.yaml:/kbark/policy.yaml:ro
+      - ./data:/kbark/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    networks: [kind, ai]
+
+networks:
+  # Created by Kind; the cluster API servers are reachable on it by name.
+  kind:
+    external: true
+  # The network the OpenAI-compatible proxy (LiteLLM) is on.
+  ai:
+    external: true
+    name: ${KBARK_AI_NETWORK}

@@ -1,13 +1,79 @@
 # kbark
 
-**A Kubernetes terminal UI in the spirit of k9s — with one new key.**
+**Kubernetes pod failures, detected and fixed — with a person approving every change.**
 
-Press **`?`** on any pod, deployment, log line, or event, and kbark pulls
-the context for you, streams a diagnosis inline, and tells you the cause
-in plain English. Read-only. Single binary. Bring your own key
-(Anthropic, OpenAI, or Ollama).
+kbark has two modes in one binary:
 
-![kbark demo](docs/demo.gif)
+- **`kbark serve`** watches every pod in one or more clusters, opens an
+  incident when one fails, proposes a specific fix as a diff, and applies
+  it only after a named person approves it on the dashboard. Then it
+  checks that the failure actually cleared.
+- **`kbark`** is a terminal UI in the spirit of k9s. Press **`?`** on any
+  pod, deployment, log line, or event for an inline AI diagnosis. This
+  mode is read-only.
+
+![kbark autofix overview](docs/screenshots/overview.png)
+
+![A proposed fix awaiting approval](docs/screenshots/incident-proposed.png)
+
+## Autofix dashboard
+
+```sh
+kbark serve --contexts kind-kbark-dev,kind-kbark-staging
+# kbark autofix dashboard: http://127.0.0.1:8765
+```
+
+What happens when a pod fails:
+
+1. **Detect.** Detectors written in Go read pod status and events. No AI
+   is involved in deciding what is wrong.
+2. **Propose.** A fixed playbook picks one of six typed fixes, or says
+   that no safe automatic fix exists and why.
+3. **Approve.** The dashboard shows the evidence, an optional AI
+   explanation, and the change as a diff validated by the API server as
+   a dry run. Nothing is written until a signed-in approver approves it.
+4. **Apply and verify.** kbark applies exactly the approved change, waits
+   for the rollout, and confirms the failure stays clear. If it does not,
+   the incident is marked failed and the change can be rolled back.
+5. **Record.** Every step goes to an append-only audit log.
+
+| Failure | Fix kbark can apply |
+|---|---|
+| Out-of-memory kills | Raise the memory limit (doubling, up to a ceiling) |
+| Crash, bad image or missing config on the latest rollout | Roll the Deployment, StatefulSet or DaemonSet back one revision |
+| One pod failing while its siblings on the same revision are healthy | Replace that pod |
+| Liveness probe killing a slow starter | Relax probe timing |
+| Evicted pods left behind | Delete the dead pod records |
+| Pods pending on a cordoned node | Uncordon the node |
+| Storage, network, credentials, application bugs | None: explained and left to a person |
+
+Around that loop:
+
+- **Sign-in and roles.** `--auth-file` enables accounts (viewer, approver,
+  admin); approvals are recorded against the signed-in account. Without
+  it the console listens on localhost only.
+- **Policy.** `--policy` sets, per cluster and namespace, which fixes may
+  be proposed, a memory ceiling, and detect-only areas. No policy can
+  remove the approval step.
+- **History.** Incidents and health trends are saved and survive restarts.
+- **Notifications.** `--notify-webhook` posts to a Slack-compatible
+  webhook when a fix is waiting, fails, or is verified.
+
+The same incidents are available in the terminal with `kbark incidents`,
+`kbark incidents show <id>` and `kbark incidents approve <id> --as <name>`.
+
+The console is a React and TypeScript app in [`web/`](web/), compiled into
+the binary (`task ui` rebuilds it). To put it on a server behind nginx
+with TLS, see [deploy/server/](deploy/server/); read
+[SECURITY.md](SECURITY.md) first.
+
+Design and deployment: [docs/AUTOFIX_PLAN.md](docs/AUTOFIX_PLAN.md).
+Failure families and fixes: [docs/FAILURE_PLAYBOOK.md](docs/FAILURE_PLAYBOOK.md).
+Try it on two local Kind clusters with `demo/demo.sh up`.
+
+## Terminal UI
+
+![kbark terminal demo](docs/demo.gif)
 
 ## Install
 
@@ -63,12 +129,18 @@ profiles:
   offline:
     provider: ollama
     model: llama3.2
+
+  gateway:                   # any OpenAI-compatible endpoint (LiteLLM, a proxy)
+    provider: openai
+    base_url: http://127.0.0.1:4000/v1
+    api_key_env: MY_GATEWAY_KEY   # name of the env var holding the key
+    model: claude-sonnet-4-6
 ```
 
 Switch profiles at startup with `kbark --profile cheap`, mid-session
 with `:profile cheap`, or via the `KBARK_PROFILE` env var.
 
-## What kbark does
+## What the terminal UI does
 
 - **Live resource tables** for pods, deployments, statefulsets,
   daemonsets, services, jobs, cronjobs, nodes, events, configmaps,
@@ -89,18 +161,21 @@ with `:profile cheap`, or via the `KBARK_PROFILE` env var.
 
 ## What kbark deliberately doesn't do
 
-- **No writes.** kbark cannot delete, scale, restart, exec, or patch
-  anything. The `?` key never produces a `kubectl` command for you
-  to run — it produces an explanation.
+- **No writes without approval.** The terminal UI is read-only. The
+  autofix layer can make six kinds of change and makes none of them
+  until a named person approves that specific change.
+- **No free-form remediation.** kbark never runs a shell command, execs
+  into a container, or executes anything a language model wrote.
 - **No background telemetry.** Your kubeconfig, API key, and cluster
-  state stay on your machine, except for the redacted payloads you
-  send to your chosen AI provider on the `?` key.
-- **No multi-cluster federation.** kbark is one terminal, one
-  cluster, one context. Switch contexts via `--context` or
-  `kubectl config use-context` like usual.
+  state stay on your machine, except for the redacted payloads sent to
+  your chosen AI provider: on the `?` key, and once per incident for
+  the dashboard's explanation (turn that off with `--no-ai`).
 
 ## Security
 
+- kbark writes to a cluster only through six typed actions in
+  `internal/remediate`, each after a named approval. `deploy/rbac.yaml`
+  is the full permission set.
 - Every payload bound for an AI provider passes through `internal/redact`
   first — credentials, tokens, passwords, and JWT-shaped values are
   replaced with `<redacted>` before the network call.
@@ -112,8 +187,9 @@ with `:profile cheap`, or via the `KBARK_PROFILE` env var.
 
 ## Status
 
-kbark is in active development. The v1 wedge is intentionally narrow:
-a k9s-shaped TUI plus the `?` key. Bug reports and feature proposals
+kbark is in active development. v0.1 shipped the terminal UI and the
+`?` key; the autofix layer is on `main` and has been exercised on Kind
+clusters only. Bug reports and feature proposals
 welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the issue
 templates.
 

@@ -21,6 +21,28 @@ the first publicly tagged release.
   Homebrew, Scoop, and `go install`
 - envtest E2E coverage of the kube layer
 
+## Autofix operations layer (in development on `main`)
+
+- `kbark serve`: watches every pod across several kubeconfig contexts
+  (or in-cluster) and opens an incident for each detected failure
+- Deterministic detectors for out-of-memory kills, crashes, image pull
+  failures, missing configuration, probe failures, scheduling,
+  storage, evictions and Service selector mismatches
+- Six typed fixes (raise memory limit, roll back a Deployment,
+  StatefulSet or DaemonSet, relax probe timing, delete a dead pod,
+  replace an unhealthy pod, uncordon a node), each previewed as a
+  dry-run diff and applied only after approval
+- Verification after every fix, exact rollback, an attempt limit and
+  an append-only audit log
+- Web console (React, TypeScript) with sign-in and roles, health and
+  incident trends, and a `kbark incidents` terminal client
+- Policy file, saved incident history, webhook notifications
+- Deployment recipes: local, in-cluster, and a single server behind
+  nginx
+
+See [docs/AUTOFIX_PLAN.md](docs/AUTOFIX_PLAN.md) and
+[docs/FAILURE_PLAYBOOK.md](docs/FAILURE_PLAYBOOK.md).
+
 ## What's coming next
 
 These are the directions the project is heading. **None are
@@ -28,9 +50,11 @@ promised, none are dated.** Open an issue to discuss any of them.
 
 - **Log viewer with diagnose** — `?` on a log line that pulls
   the surrounding window (not just the line) into the diagnosis
-- **Action mode** — restart, scale, exec, etc., behind explicit
-  per-action confirmation. Read-only is the v1 contract; writes
-  get their own trust model
+- **Single sign-on** — accounts are a file today; OIDC is the next step
+- **Incident screen in the terminal UI** — today the terminal client
+  is the `kbark incidents` command
+- **Confirmed out-of-memory kills by default** — the node-metrics check
+  exists behind `--confirm-oom` because it needs a broad permission
 - **More providers** — Azure OpenAI, Amazon Bedrock, Google Vertex
 - **Per-namespace defaults** — pin a profile to a namespace
   via config
@@ -42,9 +66,10 @@ promised, none are dated.** Open an issue to discuss any of them.
 
 - **Background telemetry.** Never. Your kubeconfig, cluster
   state, and AI prompts stay on your machine
-- **Multi-cluster federation.** kbark is one terminal, one
-  cluster, one context. Switch contexts via `--context` or
-  `kubectl config use-context`
+- **Unattended fixes.** Every change kbark makes is approved by a
+  named person first
+- **Free-form remediation.** No shell, no exec, no model-written
+  commands. The set of fixes is a short typed list
 - **A managed service.** kbark is a CLI, not a SaaS
 
 ## How decisions get made

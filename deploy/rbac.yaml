@@ -1,0 +1,66 @@
+# The complete set of permissions kbark's autofix layer uses.
+#
+# Read: what the detectors and the dashboard look at.
+# Write: exactly the five allowlisted actions, nothing else.
+#   set-memory-limit, tune-probe, rollback-workload -> update on workloads
+#   uncordon-node                                   -> patch on nodes
+#   delete-pod, restart-pod                         -> delete on pods
+#
+# Deliberately absent: secrets (kbark never reads Secret values),
+# configmaps, create on anything, pods/exec, and every RBAC resource.
+#
+# Also absent: get on nodes/proxy. Only `kbark serve --confirm-oom`
+# needs it (to read the kubelet's out-of-memory counter), and it is a
+# broad permission, so grant it separately and only if you use that flag.
+#
+# For the local mode (`kbark serve --contexts ...`), bind this
+# ClusterRole to the kubeconfig user instead of the ServiceAccount.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kbark-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kbark
+  namespace: kbark-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kbark-autofix
+rules:
+  - apiGroups: [""]
+    resources: [pods, events, nodes, services]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [apps]
+    # controllerrevisions hold the revision history of StatefulSets and
+    # DaemonSets, which rollback reads.
+    resources: [deployments, statefulsets, daemonsets, replicasets, controllerrevisions]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [update]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kbark-autofix
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kbark-autofix
+subjects:
+  - kind: ServiceAccount
+    name: kbark
+    namespace: kbark-system

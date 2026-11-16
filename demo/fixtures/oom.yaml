@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mem-hog
+  namespace: kbark-demo
+  labels: {app: mem-hog}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mem-hog}
+  template:
+    metadata:
+      labels: {app: mem-hog}
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: app
+          image: polinux/stress:1.0.4
+          # Allocates and holds about 90 MiB. The 64Mi limit is too low for it.
+          command: ["sh", "-c", "echo loading dataset into memory, about 90 MiB; exec stress --vm 1 --vm-bytes 90M --vm-hang 0"]
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {memory: 64Mi}

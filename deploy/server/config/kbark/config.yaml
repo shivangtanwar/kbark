@@ -1,0 +1,9 @@
+# kbark profile for the server. The key is not stored here: api_key_env
+# names the variable (set in kbark.env) that holds it.
+default_profile: server
+profiles:
+  server:
+    provider: openai
+    base_url: http://litellm:4000/v1
+    api_key_env: KBARK_AI_API_KEY
+    model: claude-sonnet-4-6

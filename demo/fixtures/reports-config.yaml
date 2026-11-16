@@ -1,0 +1,9 @@
+# Applying this resolves the missing-config incident without kbark
+# changing anything: the incident closes itself as "resolved".
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reports-config
+  namespace: kbark-demo
+data:
+  REPORT_INTERVAL: "60"

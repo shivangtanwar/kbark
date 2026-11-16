@@ -1,0 +1,19 @@
+# What kbark may propose on this server. First matching rule wins.
+# The system namespaces (kube-system and friends) are always detect-only;
+# that built-in rule is appended after these.
+defaults:
+  memory_ceiling: 512Mi     # the demo workloads are tiny; keep fixes small
+  max_attempts: 2
+  attempt_window: 1h
+
+rules:
+  - name: kbark itself
+    namespaces: [kbark-system]
+    mode: detect-only
+
+  # On the "staging" cluster kbark may not roll workloads back; it may
+  # only make the low-risk changes. Shows a per-cluster rule in the demo.
+  - name: staging, low-risk fixes only
+    clusters: [kbark-staging]
+    namespaces: [kbark-demo]
+    actions: [set-memory-limit, tune-probe, delete-pod, restart-pod, uncordon-node]

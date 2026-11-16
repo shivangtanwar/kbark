@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reports
+  namespace: kbark-demo
+  labels: {app: reports}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: reports}
+  template:
+    metadata:
+      labels: {app: reports}
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: app
+          image: busybox:1.36
+          command: ["sh", "-c", "echo reports up; exec sleep 360000"]
+          # The ConfigMap reports-config is not part of this manifest.
+          envFrom:
+            - configMapRef: {name: reports-config}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}

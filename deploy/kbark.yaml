@@ -1,0 +1,85 @@
+# Runs the kbark autofix dashboard inside the cluster it watches.
+# Apply deploy/rbac.yaml first, and build and load the image:
+#
+#   docker build -t kbark:dev .
+#   kind load docker-image kbark:dev --name <cluster>
+#
+# The dashboard has no login. The Service is ClusterIP only; reach it
+# with `kubectl -n kbark-system port-forward svc/kbark 8765:8765`, or
+# put an authenticating proxy in front of it. Do not expose it directly.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kbark
+  namespace: kbark-system
+  labels: {app: kbark}
+spec:
+  # One replica: incident state is held in memory.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: kbark}
+  template:
+    metadata:
+      labels: {app: kbark}
+    spec:
+      serviceAccountName: kbark
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: kbark
+          image: kbark:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - serve
+            - --in-cluster
+            - --cluster-name=$(CLUSTER_NAME)
+            - --addr=0.0.0.0:8765
+            # No sign-in: the Service is ClusterIP only and is reached by
+            # port-forward. To expose it, mount a users file and replace
+            # this flag with --auth-file and --public-url.
+            - --insecure-no-auth
+            - --state=/var/lib/kbark/state.json
+            - --audit-log=/var/lib/kbark/audit.jsonl
+            # kbark never proposes changes to its own namespace.
+            - --protected-namespaces=kube-system,kube-public,kube-node-lease,local-path-storage,kbark-system
+          env:
+            - name: CLUSTER_NAME
+              value: in-cluster
+            # Optional: explanations. Without a key kbark still detects and fixes.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: {name: kbark-ai, key: ANTHROPIC_API_KEY, optional: true}
+          ports:
+            - {name: http, containerPort: 8765}
+          readinessProbe:
+            httpGet: {path: /api/state, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: audit, mountPath: /var/lib/kbark}
+      volumes:
+        # The audit log and incident state last as long as the pod. Use a PersistentVolumeClaim
+        # here to keep it across restarts.
+        - name: audit
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kbark
+  namespace: kbark-system
+spec:
+  type: ClusterIP
+  selector: {app: kbark}
+  ports:
+    - {name: http, port: 8765, targetPort: http}

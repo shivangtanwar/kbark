@@ -26,6 +26,29 @@ tasks:
     cmds:
       - go run -ldflags "{{.LDFLAGS}}" {{.PKG}} {{.CLI_ARGS}}
 
+  ui:
+    desc: Build the web console into internal/server/dist (needs Node 20+)
+    dir: web
+    cmds:
+      - npm ci
+      - npm run build
+
+  ui-dev:
+    desc: Run the web console with hot reload against a local `kbark serve`
+    dir: web
+    cmds:
+      - npm run dev
+
+  serve:
+    desc: Run the autofix dashboard against the two demo Kind clusters
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" {{.PKG}} serve --contexts kind-kbark-dev,kind-kbark-staging {{.CLI_ARGS}}
+
+  demo-up:
+    desc: Create the demo Kind clusters and the healthy baseline
+    cmds:
+      - demo/demo.sh up
+
   test:
     desc: Run unit tests
     cmds:

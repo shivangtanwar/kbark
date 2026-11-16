@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Runs the demo scenario script with this server's kind and kubectl.
+#   ~/kbark/deploy/demo break oom kind-kbark-staging
+#   ~/kbark/deploy/demo reset kind-kbark-dev
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PATH="$ROOT/bin:$PATH" exec "$ROOT/demo/demo.sh" "$@"

@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch
+  namespace: kbark-demo
+  labels: {app: batch}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: batch}
+  template:
+    metadata:
+      labels: {app: batch}
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: app
+          image: busybox:1.36
+          command: ["sh", "-c", "echo batch running; exec sleep 360000"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
