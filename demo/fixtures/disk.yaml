@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uploader
+  namespace: kbark-demo
+  labels: {app: uploader}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: uploader}
+  template:
+    metadata:
+      labels: {app: uploader}
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: app
+          image: busybox:1.36
+          # Buffers 24 MiB of uploads on local disk under a 16Mi limit.
+          # The node evicts the pod; the replacement does the same.
+          command: ["sh", "-c", "echo buffering uploads in /tmp/spool; sleep 20; dd if=/dev/zero of=/tmp/spool.bin bs=1M count=24 2>/dev/null; echo spool is 24 MiB; exec sleep 3600"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi, ephemeral-storage: 16Mi}
+            limits: {memory: 64Mi, ephemeral-storage: 16Mi}

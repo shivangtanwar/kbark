@@ -16,4 +16,4 @@ rules:
   - name: staging, low-risk fixes only
     clusters: [kbark-staging]
     namespaces: [kbark-demo]
-    actions: [set-memory-limit, tune-probe, delete-pod, restart-pod, uncordon-node]
+    actions: [set-memory-limit, set-ephemeral-storage-limit, set-image-pull-policy, tune-probe, delete-pod, restart-pod, uncordon-node]

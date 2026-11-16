@@ -1,10 +1,13 @@
 # The complete set of permissions kbark's autofix layer uses.
 #
 # Read: what the detectors and the dashboard look at.
-# Write: exactly the five allowlisted actions, nothing else.
-#   set-memory-limit, tune-probe, rollback-workload -> update on workloads
-#   uncordon-node                                   -> patch on nodes
-#   delete-pod, restart-pod                         -> delete on pods
+# Write: exactly the allowlisted actions, nothing else.
+#   set-memory-limit, set-ephemeral-storage-limit, tune-probe,
+#   set-image-pull-policy, rollback-workload -> update on workloads
+#   fix-service-selector                     -> update on services
+#   uncordon-node                            -> patch on nodes
+#   delete-pod, restart-pod, and the broken
+#   pods of a StatefulSet rollback           -> delete on pods
 #
 # Deliberately absent: secrets (kbark never reads Secret values),
 # configmaps, create on anything, pods/exec, and every RBAC resource.
@@ -44,6 +47,9 @@ rules:
     verbs: [get, list, watch]
   - apiGroups: [apps]
     resources: [deployments, statefulsets, daemonsets]
+    verbs: [update]
+  - apiGroups: [""]
+    resources: [services]
     verbs: [update]
   - apiGroups: [""]
     resources: [nodes]

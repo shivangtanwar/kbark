@@ -309,6 +309,15 @@ func (c *Cluster) Scan(now time.Time) Snapshot {
 		namespaces[p.Namespace] = true
 		owner := c.Owner(p)
 		findings := detect.Pod(p, c.EventsFor(string(p.UID)), now)
+		for i, f := range findings {
+			// An eviction for exceeding a limit that the workload no
+			// longer has is history: only the dead record is left.
+			if f.Family == detect.FamilyDisk && !c.limitCurrent(p, owner, f.Container) {
+				if plain, ok := detect.Evicted(p); ok {
+					findings[i] = plain
+				}
+			}
+		}
 
 		row := PodRow{
 			Cluster: c.Name, Namespace: p.Namespace, Name: p.Name,
@@ -341,6 +350,12 @@ func (c *Cluster) Scan(now time.Time) Snapshot {
 	for _, o := range c.serviceObservations(pods) {
 		o := o
 		byKey[o.Key] = &o
+	}
+	for _, o := range c.creationObservations(now) {
+		o := o
+		if _, ok := byKey[o.Key]; !ok {
+			byKey[o.Key] = &o
+		}
 	}
 
 	for _, o := range byKey {
@@ -382,7 +397,7 @@ func (c *Cluster) serviceObservations(pods []*corev1.Pod) []Observation {
 				matched = true
 				break
 			}
-			if nearMatch(s.Spec.Selector, p.Labels) {
+			if NearMatch(s.Spec.Selector, p.Labels) {
 				near = append(near, p.Name)
 			}
 		}
@@ -410,10 +425,10 @@ func (c *Cluster) serviceObservations(pods []*corev1.Pod) []Observation {
 	return out
 }
 
-// nearMatch reports whether the pod has every selector key and each
+// NearMatch reports whether the pod has every selector key and each
 // value is equal once case and punctuation are ignored, with at least
 // one value differing as written. "check-out" nearly matches "checkout".
-func nearMatch(selector, podLabels map[string]string) bool {
+func NearMatch(selector, podLabels map[string]string) bool {
 	for k, want := range selector {
 		got, ok := podLabels[k]
 		if !ok || normalize(got) != normalize(want) {
@@ -431,6 +446,90 @@ func normalize(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// Template returns the current pod template of a Deployment,
+// StatefulSet or DaemonSet from the cache, or nil.
+func (c *Cluster) Template(namespace string, ref Ref) *corev1.PodTemplateSpec {
+	switch ref.Kind {
+	case "Deployment":
+		if o, err := c.Deployments.Deployments(namespace).Get(ref.Name); err == nil {
+			return &o.Spec.Template
+		}
+	case "StatefulSet":
+		if o, err := c.StatefulSets.StatefulSets(namespace).Get(ref.Name); err == nil {
+			return &o.Spec.Template
+		}
+	case "DaemonSet":
+		if o, err := c.DaemonSets.DaemonSets(namespace).Get(ref.Name); err == nil {
+			return &o.Spec.Template
+		}
+	}
+	return nil
+}
+
+// limitCurrent reports whether the workload still gives the container
+// the ephemeral-storage limit the evicted pod ran with.
+func (c *Cluster) limitCurrent(pod *corev1.Pod, owner Ref, container string) bool {
+	tmpl := c.Template(pod.Namespace, owner)
+	if tmpl == nil {
+		return false
+	}
+	limit := func(list []corev1.Container) (string, bool) {
+		for _, ctr := range list {
+			if ctr.Name == container {
+				q := ctr.Resources.Limits[corev1.ResourceEphemeralStorage]
+				return q.String(), true
+			}
+		}
+		return "", false
+	}
+	had, ok1 := limit(pod.Spec.Containers)
+	has, ok2 := limit(tmpl.Spec.Containers)
+	return ok1 && ok2 && had == has
+}
+
+// creationObservations reports controllers that want more pods than
+// they have and are being refused when they create them. No pod exists
+// in this failure, so it cannot be found from pod state.
+func (c *Cluster) creationObservations(now time.Time) []Observation {
+	var out []Observation
+	add := func(namespace string, ref Ref, uid string, have, want int32) {
+		if have >= want {
+			return
+		}
+		f, ok := detect.Creation(c.EventsFor(uid), now)
+		if !ok {
+			return
+		}
+		f.Evidence = append(f.Evidence, detect.Evidence{Label: "Pods", Value: fmt.Sprintf("%d created of %d wanted", have, want)})
+		out = append(out, Observation{Key: Key(namespace, ref, detect.FamilyAdmission), Namespace: namespace, Workload: ref, Finding: f, Pods: []string{}})
+	}
+	want := func(p *int32) int32 {
+		if p == nil {
+			return 1
+		}
+		return *p
+	}
+	rss, _ := c.ReplicaSets.List(labels.Everything())
+	for _, rs := range rss {
+		ref := Ref{Kind: "ReplicaSet", Name: rs.Name}
+		for _, o := range rs.OwnerReferences {
+			if o.Controller != nil && *o.Controller && o.Kind == "Deployment" {
+				ref = Ref{Kind: "Deployment", Name: o.Name}
+			}
+		}
+		add(rs.Namespace, ref, string(rs.UID), rs.Status.Replicas, want(rs.Spec.Replicas))
+	}
+	stss, _ := c.StatefulSets.List(labels.Everything())
+	for _, s := range stss {
+		add(s.Namespace, Ref{Kind: "StatefulSet", Name: s.Name}, string(s.UID), s.Status.Replicas, want(s.Spec.Replicas))
+	}
+	dss, _ := c.DaemonSets.List(labels.Everything())
+	for _, d := range dss {
+		add(d.Namespace, Ref{Kind: "DaemonSet", Name: d.Name}, string(d.UID), d.Status.CurrentNumberScheduled, d.Status.DesiredNumberScheduled)
+	}
+	return out
 }
 
 // Key identifies an incident within a cluster.

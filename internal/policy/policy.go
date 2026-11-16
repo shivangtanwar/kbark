@@ -31,7 +31,7 @@ type Rule struct {
 	// Mode is "propose" (default) or "detect-only".
 	Mode string `json:"mode,omitempty"`
 	// Actions, when set, is the allowlist of action types kbark may
-	// propose under this rule. Empty means all five.
+	// propose under this rule. Empty means all of them.
 	Actions []string `json:"actions,omitempty"`
 	// MemoryCeiling overrides the default for this rule.
 	MemoryCeiling string `json:"memory_ceiling,omitempty"`
@@ -67,7 +67,10 @@ type Decision struct {
 func (d Decision) Allows(action string) bool { return d.actions == nil || d.actions[action] }
 
 // KnownActions is the closed set of action types; Load rejects others.
-var KnownActions = []string{"set-memory-limit", "rollback-workload", "tune-probe", "delete-pod", "restart-pod", "uncordon-node"}
+var KnownActions = []string{
+	"set-memory-limit", "rollback-workload", "tune-probe", "delete-pod", "restart-pod", "uncordon-node",
+	"set-ephemeral-storage-limit", "set-image-pull-policy", "fix-service-selector",
+}
 
 // Default builds the built-in policy: the given namespaces are
 // detect-only, everything else may be proposed.

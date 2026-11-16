@@ -1,5 +1,9 @@
 version: '3'
 
+# Optional, never in the repository: API keys for local runs, for
+# example KBARK_AI_API_KEY for an OpenAI-compatible profile.
+dotenv: ['{{.HOME}}/.config/kbark/kbark.env']
+
 vars:
   BINARY: kbark
   PKG: ./cmd/kbark

@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thumbnailer
+  namespace: kbark-demo
+  labels: {app: thumbnailer}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: thumbnailer}
+  template:
+    metadata:
+      labels: {app: thumbnailer}
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: app
+          # This tag is not preloaded on the node, and Never forbids
+          # the kubelet from fetching it.
+          image: busybox:1.35
+          imagePullPolicy: Never
+          command: ["sh", "-c", "echo thumbnailer ready; exec sleep 3600"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}

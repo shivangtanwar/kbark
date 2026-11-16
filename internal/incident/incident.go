@@ -55,6 +55,14 @@ const (
 	ActionDeletePod        = "delete-pod"
 	ActionRestartPod       = "restart-pod"
 	ActionUncordonNode     = "uncordon-node"
+	// ActionSetEphemeralLimit raises a container's ephemeral-storage limit.
+	ActionSetEphemeralLimit = "set-ephemeral-storage-limit"
+	// ActionSetPullPolicy changes a container's image pull policy from
+	// Never to IfNotPresent.
+	ActionSetPullPolicy = "set-image-pull-policy"
+	// ActionFixServiceSelector points a Service's selector at the pods
+	// whose labels it nearly matches.
+	ActionFixServiceSelector = "fix-service-selector"
 )
 
 // Action is one typed, previewable change. It is data, not a command:
@@ -89,6 +97,8 @@ type Undo struct {
 	// AppliedGeneration is the workload generation right after the
 	// fix; rollback refuses if someone has changed the spec since.
 	AppliedGeneration int64 `json:"appliedGeneration,omitempty"`
+	// PrevSelector is a Service's selector before the fix.
+	PrevSelector map[string]string `json:"prevSelector,omitempty"`
 }
 
 // HistoryEntry is one step in an incident's life.

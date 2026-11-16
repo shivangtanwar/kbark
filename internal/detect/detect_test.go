@@ -215,6 +215,50 @@ func TestPod(t *testing.T) {
 			wantFamily: FamilyProbe, wantCause: CauseProbeReadiness,
 		},
 		{
+			name: "readiness probe that times out is a timing problem",
+			mutate: func(p *corev1.Pod) {
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "app", State: running(3 * time.Minute)}}
+			},
+			events:     []*corev1.Event{event("Unhealthy", "Readiness probe failed: command timed out: \"sh -c check\" timed out after 1s", 5*time.Second)},
+			wantFamily: FamilyProbe, wantCause: CauseProbeTimeout,
+		},
+		{
+			name: "image absent from the node with pull policy Never",
+			mutate: func(p *corev1.Pod) {
+				p.Status.Phase = corev1.PodPending
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name: "app", Image: "busybox:1.35",
+					State: waiting("ErrImageNeverPull", `Container image "busybox:1.35" is not present with pull policy of Never`),
+				}}
+			},
+			wantFamily: FamilyImagePull, wantCause: CauseNeverPull, wantText: "pull policy is Never",
+		},
+		{
+			name: "evicted for exceeding the pod's ephemeral-storage limit",
+			mutate: func(p *corev1.Pod) {
+				p.Spec.Containers[0].Resources.Limits[corev1.ResourceEphemeralStorage] = resource.MustParse("16Mi")
+				p.Status = corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted", Message: "Pod ephemeral local storage usage exceeds the total limit of containers 16Mi. "}
+			},
+			wantFamily: FamilyDisk, wantText: "16Mi ephemeral-storage limit",
+		},
+		{
+			name: "evicted for exceeding a named container's ephemeral-storage limit",
+			mutate: func(p *corev1.Pod) {
+				p.Status = corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted", Message: `Container app exceeded its local ephemeral storage limit "16Mi". `}
+			},
+			wantFamily: FamilyDisk, wantText: `container "app" was evicted`,
+		},
+		{
+			name: "pod-wide storage eviction with two limited containers stays a plain eviction",
+			mutate: func(p *corev1.Pod) {
+				lim := corev1.ResourceList{corev1.ResourceEphemeralStorage: resource.MustParse("8Mi")}
+				p.Spec.Containers[0].Resources.Limits = lim
+				p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: "side", Resources: corev1.ResourceRequirements{Limits: lim}})
+				p.Status = corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted", Message: "Pod ephemeral local storage usage exceeds the total limit of containers 16Mi. "}
+			},
+			wantFamily: FamilyEvicted,
+		},
+		{
 			name: "unready container without probe events is left alone",
 			mutate: func(p *corev1.Pod) {
 				p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "app", State: running(3 * time.Minute)}}
@@ -363,5 +407,43 @@ func unschedulable(p *corev1.Pod, msg string) {
 		Conditions: []corev1.PodCondition{{
 			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable, Message: msg,
 		}},
+	}
+}
+
+func TestCreation(t *testing.T) {
+	failed := func(msg string, age time.Duration) []*corev1.Event {
+		return []*corev1.Event{{Reason: "FailedCreate", Message: msg, Count: 12, LastTimestamp: ago(age)}}
+	}
+	tests := []struct {
+		name      string
+		events    []*corev1.Event
+		wantCause string // "" means no finding
+	}{
+		{"no events", nil, ""},
+		{"other events only", []*corev1.Event{{Reason: "SuccessfulCreate", Message: "Created pod: x", LastTimestamp: ago(time.Second)}}, ""},
+		{"stale refusal", failed(`pods "x" is forbidden: exceeded quota: compute`, time.Hour), ""},
+		{"quota", failed(`Error creating: pods "api-5d9-" is forbidden: exceeded quota: compute, requested: pods=1, used: pods=4, limited: pods=4`, time.Minute), CauseQuota},
+		{"service account", failed(`Error creating: pods "api-5d9-" is forbidden: error looking up service account shop/ghost: serviceaccount "ghost" not found`, time.Minute), CauseServiceAccount},
+		{"pod security", failed(`Error creating: pods "api-5d9-" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false`, time.Minute), CausePodSecurity},
+		{"limit range", failed(`Error creating: pods "api-5d9-" is forbidden: maximum memory usage per Container is 1Gi, but limit is 2Gi`, time.Minute), CauseLimitRange},
+		{"webhook", failed(`Error creating: admission webhook "validate.example.com" denied the request: no`, time.Minute), CauseWebhook},
+		{"something else", failed(`Error creating: Internal error occurred`, time.Minute), CauseUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, ok := Creation(tt.events, now)
+			if tt.wantCause == "" {
+				if ok {
+					t.Fatalf("want no finding, got %+v", f)
+				}
+				return
+			}
+			if !ok || f.Family != FamilyAdmission || f.Cause != tt.wantCause {
+				t.Fatalf("got ok=%v %+v, want cause %q", ok, f, tt.wantCause)
+			}
+			if f.Summary == "" || len(f.Evidence) == 0 {
+				t.Errorf("finding lacks summary or evidence: %+v", f)
+			}
+		})
 	}
 }

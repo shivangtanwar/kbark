@@ -30,6 +30,12 @@ const (
 	FamilyStorage    Family = "storage"
 	FamilyEvicted    Family = "evicted"
 	FamilyNetwork    Family = "network"
+	// FamilyDisk: a pod was evicted for writing more local data than
+	// its ephemeral-storage limit allows.
+	FamilyDisk Family = "disk"
+	// FamilyAdmission: a controller is refused when it tries to create
+	// pods, so there is no pod to look at.
+	FamilyAdmission Family = "admission"
 )
 
 // Causes refine a family. The playbook branches on them, so they are
@@ -38,6 +44,7 @@ const (
 	CauseBadReference = "bad-reference" // image name or tag does not exist
 	CauseAuth         = "auth"          // registry refused credentials
 	CauseRegistry     = "registry"      // registry unreachable
+	CauseNeverPull    = "never-pull"    // pull policy Never and the image is not on the node
 
 	CauseProbeTimeout   = "timeout"
 	CauseProbeRefused   = "refused"
@@ -48,6 +55,12 @@ const (
 	CauseInsufficient = "insufficient"
 	CauseSelector     = "selector"
 	CauseTaint        = "taint"
+
+	CauseQuota          = "quota"
+	CauseServiceAccount = "service-account"
+	CausePodSecurity    = "pod-security"
+	CauseLimitRange     = "limit-range"
+	CauseWebhook        = "webhook"
 
 	// CauseInferred marks an out-of-memory finding that the container
 	// runtime did not label as OOMKilled. Some runtimes (containerd
@@ -70,6 +83,10 @@ const (
 	// NotReadyGrace is how long a running container may be unready
 	// before a failing readiness probe is reported.
 	NotReadyGrace = 60 * time.Second
+	// CreateWindow is how long a refused pod creation counts as current.
+	// Controllers retry with a growing delay, so this is longer than
+	// RecentWindow.
+	CreateWindow = 20 * time.Minute
 )
 
 // Evidence is one observed fact supporting a finding.
@@ -99,8 +116,8 @@ func Pod(pod *corev1.Pod, events []*corev1.Event, now time.Time) []Finding {
 	if pod.Status.Phase == corev1.PodSucceeded {
 		return nil
 	}
-	if f, ok := evicted(pod); ok {
-		return []Finding{f}
+	if f, ok := Evicted(pod); ok {
+		return []Finding{overLimit(pod, f)}
 	}
 	if pod.Status.Phase == corev1.PodFailed {
 		return nil
@@ -135,7 +152,10 @@ func Pod(pod *corev1.Pod, events []*corev1.Event, now time.Time) []Finding {
 	return out
 }
 
-func evicted(pod *corev1.Pod) (Finding, bool) {
+// Evicted reports a pod the node terminated whose dead record remains.
+// It is the plain form of the finding; Pod refines it to FamilyDisk
+// when the node names an ephemeral-storage limit as the reason.
+func Evicted(pod *corev1.Pod) (Finding, bool) {
 	if pod.Status.Phase != corev1.PodFailed || pod.Status.Reason == "" {
 		return Finding{}, false
 	}
@@ -162,6 +182,85 @@ func evicted(pod *corev1.Pod) (Finding, bool) {
 		Summary:  fmt.Sprintf("pod was terminated by the node (%s) and its dead record remains", pod.Status.Reason),
 		Evidence: ev,
 	}, true
+}
+
+var (
+	reContainerDisk = regexp.MustCompile(`Container (\S+) exceeded its local ephemeral storage limit "?([^". ]+)`)
+	rePodDisk       = regexp.MustCompile(`ephemeral local storage usage exceeds the total limit of containers ([0-9A-Za-z]+)`)
+)
+
+// overLimit turns an eviction into a FamilyDisk finding when the node's
+// message says a container went over its ephemeral-storage limit and it
+// is clear which container that was.
+func overLimit(pod *corev1.Pod, f Finding) Finding {
+	msg := pod.Status.Message
+	name, limit := "", ""
+	if m := reContainerDisk.FindStringSubmatch(msg); m != nil {
+		name, limit = m[1], m[2]
+	} else if m := rePodDisk.FindStringSubmatch(msg); m != nil {
+		// The pod-wide message names no container. It is unambiguous
+		// only when exactly one container carries a limit.
+		limit = m[1]
+		for _, c := range pod.Spec.Containers {
+			if q, ok := c.Resources.Limits[corev1.ResourceEphemeralStorage]; ok && !q.IsZero() {
+				if name != "" {
+					return f
+				}
+				name = c.Name
+			}
+		}
+	}
+	if name == "" || containerSpec(pod, name, false) == nil {
+		return f
+	}
+	f.Family, f.Container = FamilyDisk, name
+	f.Summary = fmt.Sprintf("container %q was evicted for writing more than its %s ephemeral-storage limit", name, limit)
+	f.Evidence = append(f.Evidence, Evidence{"Ephemeral-storage limit", limit})
+	return f
+}
+
+// Creation reports that a controller is being refused when it creates
+// pods. events are the events of the controller object itself (a
+// ReplicaSet, StatefulSet or DaemonSet); the caller has already
+// established that the controller has fewer pods than it wants.
+func Creation(events []*corev1.Event, now time.Time) (Finding, bool) {
+	var ev *corev1.Event
+	for _, e := range events {
+		if e.Reason == "FailedCreate" && now.Sub(eventTime(e)) < CreateWindow {
+			if ev == nil || eventTime(e).After(eventTime(ev)) {
+				ev = e
+			}
+		}
+	}
+	if ev == nil {
+		return Finding{}, false
+	}
+	f := Finding{
+		Family: FamilyAdmission, Reason: "FailedCreate", Cause: CauseUnknown,
+		Summary: "pods cannot be created: the API server refuses them",
+		Evidence: []Evidence{
+			{"Event", fmt.Sprintf("FailedCreate: %s (seen %d times)", ev.Message, eventCount(ev))},
+		},
+	}
+	m := strings.ToLower(ev.Message)
+	switch {
+	case strings.Contains(m, "exceeded quota"):
+		f.Cause = CauseQuota
+		f.Summary = "pods cannot be created: the namespace's resource quota is used up"
+	case strings.Contains(m, "serviceaccount") || strings.Contains(m, "service account"):
+		f.Cause = CauseServiceAccount
+		f.Summary = "pods cannot be created: the ServiceAccount they name does not exist"
+	case strings.Contains(m, "podsecurity"):
+		f.Cause = CausePodSecurity
+		f.Summary = "pods cannot be created: the pod spec violates the namespace's Pod Security level"
+	case strings.Contains(m, "admission webhook"):
+		f.Cause = CauseWebhook
+		f.Summary = "pods cannot be created: an admission webhook rejects them"
+	case strings.Contains(m, "usage per container") || strings.Contains(m, "usage per pod") || strings.Contains(m, "limit ratio"):
+		f.Cause = CauseLimitRange
+		f.Summary = "pods cannot be created: their resources fall outside the namespace's LimitRange"
+	}
+	return f, true
 }
 
 func scheduling(pod *corev1.Pod, now time.Time) (Finding, bool) {
@@ -247,6 +346,10 @@ func container(pod *corev1.Pod, cs *corev1.ContainerStatus, init bool, events []
 		}
 		if w.Message != "" {
 			f.Evidence = append(f.Evidence, Evidence{"Kubelet message", w.Message})
+		}
+		if f.Cause == CauseNeverPull {
+			f.Summary = fmt.Sprintf("%s %q cannot start: image %s is not on the node and its pull policy is Never", kind, cs.Name, cs.Image)
+			f.Evidence = append(f.Evidence, Evidence{"Pull policy", "Never"})
 		}
 		return f, true
 	}
@@ -381,6 +484,11 @@ func container(pod *corev1.Pod, cs *corev1.ContainerStatus, init bool, events []
 		if ev, _ := probeEvent(events, cs.Name, now, "Readiness"); ev != nil {
 			f := base
 			f.Family, f.Reason, f.Probe, f.Cause = FamilyProbe, "Unhealthy", "readiness", CauseProbeReadiness
+			if probeCause(ev.Message) == CauseProbeTimeout {
+				// The check itself is too slow for its deadline, which
+				// is a timing problem rather than a failing answer.
+				f.Cause = CauseProbeTimeout
+			}
 			f.Summary = fmt.Sprintf("container %q is running but its readiness probe fails, so it receives no traffic", cs.Name)
 			f.Evidence = []Evidence{
 				{"Probe event", fmt.Sprintf("%s (seen %d times)", ev.Message, eventCount(ev))},
@@ -452,6 +560,8 @@ func imageCause(reason, text string) string {
 	switch {
 	case reason == "InvalidImageName":
 		return CauseBadReference
+	case reason == "ErrImageNeverPull":
+		return CauseNeverPull
 	case strings.Contains(t, "not found"), strings.Contains(t, "manifest unknown"), strings.Contains(t, "repository does not exist"):
 		return CauseBadReference
 	case strings.Contains(t, "unauthorized"), strings.Contains(t, "denied"), strings.Contains(t, "authentication required"), strings.Contains(t, "authorization failed"):

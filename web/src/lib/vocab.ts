@@ -36,12 +36,15 @@ export const FAMILIES: Record<string, string> = {
   'oom': 'Out of memory', 'crash': 'Application crash', 'image-pull': 'Image pull failure',
   'config': 'Missing configuration', 'probe': 'Health probe failure', 'scheduling': 'Unschedulable',
   'storage': 'Storage failure', 'evicted': 'Evicted pod', 'network': 'Service without endpoints',
+  'disk': 'Local disk limit exceeded', 'admission': 'Pods refused at creation',
 };
 
 export const ACTIONS: Record<string, string> = {
   'set-memory-limit': 'Raise memory limit', 'rollback-workload': 'Roll back workload',
   'tune-probe': 'Relax probe timing', 'delete-pod': 'Delete dead pod',
   'restart-pod': 'Replace unhealthy pod', 'uncordon-node': 'Uncordon node',
+  'set-ephemeral-storage-limit': 'Raise local disk limit', 'set-image-pull-policy': 'Allow image pull',
+  'fix-service-selector': 'Correct Service selector',
 };
 
 export const family = (f: string) => FAMILIES[f] ?? f;

@@ -4,6 +4,7 @@ package remediate
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +86,14 @@ func TestStatefulSetRollbackUsesControllerRevisions(t *testing.T) {
 	live, _ := c.Client.AppsV1().StatefulSets(tk.NS).Get(ctx, "db", metav1.GetOptions{})
 	if img := live.Spec.Template.Spec.Containers[0].Image; img != "db:1" {
 		t.Fatalf("image after rollback = %s, want db:1", img)
+	}
+	// A StatefulSet leaves a broken pod in place after its template is
+	// reverted, so the fix has to remove it.
+	if !strings.Contains(plan.Action.Title, "replace 1 broken pod") || !strings.Contains(plan.Action.Diff, "-pod/db-0") {
+		t.Errorf("the proposal does not show the pod deletion: %q\n%s", plan.Action.Title, plan.Action.Diff)
+	}
+	if _, err := c.Client.CoreV1().Pods(tk.NS).Get(ctx, "db-0", metav1.GetOptions{}); err == nil {
+		t.Error("the broken pod was not deleted")
 	}
 }
 

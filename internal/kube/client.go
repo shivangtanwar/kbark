@@ -12,8 +12,8 @@ import (
 // AllowedVerbs is the read-only set of API verbs the terminal UI and
 // the AI tool layer may use. The autofix layer's writes do not go
 // through this package: they are confined to internal/remediate, whose
-// five typed actions need update on workloads, patch on nodes and
-// delete on pods (see deploy/rbac.yaml).
+// typed actions need update on workloads and services, patch on nodes
+// and delete on pods (see deploy/rbac.yaml).
 var AllowedVerbs = []string{"get", "list", "watch", "getlog"}
 
 // NewClientset builds a typed Kubernetes clientset from the persistent flags.

@@ -5,7 +5,7 @@
 // (Apply), reverses it (Rollback), and reports whether the cluster has
 // finished reacting (Settled).
 //
-// The set of actions is closed: the five constants in package incident.
+// The set of actions is closed: the constants in package incident.
 // Nothing in this package executes text produced by a language model.
 package remediate
 
@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/shivangtanwar/kbark/internal/detect"
 	"github.com/shivangtanwar/kbark/internal/fleet"
@@ -46,6 +48,9 @@ type Planner struct {
 	// out-of-memory event before proposing a fix for an inferred one.
 	// Needs get on nodes/proxy; off by default.
 	ConfirmOOM bool
+	// StorageCeiling is the largest ephemeral-storage limit kbark will
+	// propose. Zero means 2Gi.
+	StorageCeiling resource.Quantity
 }
 
 // Plan is the outcome of planning: exactly one of Action or Manual is set.
@@ -65,7 +70,7 @@ func (p *Planner) Plan(ctx context.Context, c *fleet.Cluster, inc *incident.Inci
 	case detect.FamilyStorage:
 		return manual("Storage changes can lose data, so kbark does not make them. Check the PersistentVolumeClaim, its StorageClass and the volume events shown in the evidence.")
 	case detect.FamilyNetwork:
-		return manual("kbark cannot tell whether the Service selector or the pod labels are the side that is wrong. Align them so the selector matches the intended pods.")
+		return p.planServiceSelector(ctx, c, inc)
 	case detect.FamilyScheduling:
 		if inc.Cause == detect.CauseCordoned {
 			return p.planUncordon(ctx, c)
@@ -83,11 +88,35 @@ func (p *Planner) Plan(ctx context.Context, c *fleet.Cluster, inc *incident.Inci
 	case detect.FamilyOOM:
 		return p.planMemory(ctx, c, inc)
 
+	case detect.FamilyDisk:
+		return p.planEphemeral(ctx, c, inc)
+
+	case detect.FamilyAdmission:
+		if inc.Cause == detect.CauseQuota {
+			return manual("The namespace's ResourceQuota has no room for these pods. Raising the quota or freeing capacity is a decision kbark does not make; the event in the evidence shows what was requested, used and allowed.")
+		}
+		if plan, ok := p.planRollback(ctx, c, inc, false); ok {
+			return plan
+		}
+		switch inc.Cause {
+		case detect.CauseServiceAccount:
+			return manual("The pods name a ServiceAccount that does not exist, and there is no earlier revision that names a different one. kbark does not create ServiceAccounts, because an account carries permissions. Create it or correct the name.")
+		case detect.CausePodSecurity:
+			return manual("The pod spec violates the namespace's Pod Security level and no earlier revision is still running. Loosening the level or the spec is a security decision; the event in the evidence lists each violation.")
+		case detect.CauseLimitRange:
+			return manual("The pods' resource requests or limits fall outside the namespace's LimitRange and no earlier revision is still running. Adjust the resources or the LimitRange.")
+		case detect.CauseWebhook:
+			return manual("An admission webhook rejects the pods and no earlier revision is still running. The webhook's message in the evidence says what it requires.")
+		}
+		return manual("The API server refuses to create the pods and no earlier revision is still running. The event in the evidence gives its reason.")
+
 	case detect.FamilyImagePull:
 		if plan, ok := p.planRollback(ctx, c, inc, true); ok {
 			return plan
 		}
 		switch inc.Cause {
+		case detect.CauseNeverPull:
+			return p.planPullPolicy(ctx, c, inc)
 		case detect.CauseAuth:
 			return manual("The registry refused the pull. This needs a valid imagePullSecret, which kbark cannot create.")
 		case detect.CauseRegistry:
@@ -114,7 +143,9 @@ func (p *Planner) Plan(ctx context.Context, c *fleet.Cluster, inc *incident.Inci
 		if plan, ok := p.planRestartPods(c, inc); ok {
 			return plan
 		}
-		tunable := inc.Probe != "readiness" && (inc.Cause == detect.CauseProbeTimeout || inc.Cause == detect.CauseProbeRefused)
+		// A liveness or startup probe that is refused or times out, and
+		// a readiness probe that times out, are timing problems.
+		tunable := inc.Cause == detect.CauseProbeTimeout || (inc.Cause == detect.CauseProbeRefused && inc.Probe != "readiness")
 		if plan, ok := p.planRollback(ctx, c, inc, false); ok && (!tunable || probeChanged(plan.Action, inc)) {
 			return plan
 		}
@@ -185,6 +216,79 @@ func (p *Planner) planMemory(ctx context.Context, c *fleet.Cluster, inc *inciden
 	return p.finish(ctx, c, inc, a)
 }
 
+// --- set-ephemeral-storage-limit ---
+
+func (p *Planner) planEphemeral(ctx context.Context, c *fleet.Cluster, inc *incident.Incident) Plan {
+	ceiling := p.StorageCeiling
+	if ceiling.IsZero() {
+		ceiling = resource.MustParse("2Gi")
+	}
+	w, err := getWorkload(ctx, c.Client, inc.Namespace, inc.Workload.Kind, inc.Workload.Name)
+	if err != nil {
+		return manual("Could not read %s: %v", inc.Workload, err)
+	}
+	ctr := findContainer(w.template, inc.Container, false)
+	if ctr == nil {
+		return manual("Container %q is no longer part of %s.", inc.Container, inc.Workload)
+	}
+	old, ok := ctr.Resources.Limits[corev1.ResourceEphemeralStorage]
+	if !ok || old.IsZero() {
+		return manual("Container %q no longer has an ephemeral-storage limit.", inc.Container)
+	}
+	if old.Cmp(ceiling) >= 0 {
+		return manual("The ephemeral-storage limit (%s) is already at kbark's ceiling (%s). A container that fills this much local disk should write to a volume, or stop writing.", old.String(), ceiling.String())
+	}
+	next := old.DeepCopy()
+	next.Add(old)
+	if next.Cmp(ceiling) > 0 {
+		next = ceiling.DeepCopy()
+	}
+	a := &incident.Action{
+		Type:       incident.ActionSetEphemeralLimit,
+		TargetKind: inc.Workload.Kind, TargetName: inc.Workload.Name,
+		Params: map[string]string{
+			"container": inc.Container, "from": old.String(), "to": next.String(),
+		},
+		Title: fmt.Sprintf("Raise ephemeral-storage limit of container %q from %s to %s", inc.Container, old.String(), next.String()),
+		Rationale: fmt.Sprintf("The node evicted the pod because the container wrote more local data (logs, its writable layer, emptyDir volumes) than its %s limit allows, and each replacement is evicted the same way. Doubling the limit (capped at %s) gives it room. The dead pod records stay until they are deleted; kbark proposes that separately once this fix holds.",
+			old.String(), ceiling.String()),
+		Risk:       "low",
+		Warnings:   []string{"If the container's disk use keeps growing (an unrotated log, a cache without a bound), a higher limit only delays the next eviction."},
+		Reversible: true,
+	}
+	return p.finish(ctx, c, inc, a)
+}
+
+// --- set-image-pull-policy ---
+
+func (p *Planner) planPullPolicy(ctx context.Context, c *fleet.Cluster, inc *incident.Incident) Plan {
+	w, err := getWorkload(ctx, c.Client, inc.Namespace, inc.Workload.Kind, inc.Workload.Name)
+	if err != nil {
+		return manual("Could not read %s: %v", inc.Workload, err)
+	}
+	ctr := findContainer(w.template, inc.Container, inc.Init)
+	if ctr == nil {
+		return manual("Container %q is no longer part of %s.", inc.Container, inc.Workload)
+	}
+	if ctr.ImagePullPolicy != corev1.PullNever {
+		return manual("Container %q no longer has the pull policy Never.", inc.Container)
+	}
+	a := &incident.Action{
+		Type:       incident.ActionSetPullPolicy,
+		TargetKind: inc.Workload.Kind, TargetName: inc.Workload.Name,
+		Params: map[string]string{
+			"container": inc.Container, "init": strconv.FormatBool(inc.Init),
+			"from": string(corev1.PullNever), "to": string(corev1.PullIfNotPresent),
+		},
+		Title:      fmt.Sprintf("Let the node pull the image of container %q: pull policy Never to IfNotPresent", inc.Container),
+		Rationale:  fmt.Sprintf("Image %s is not on the node, and the pull policy Never forbids the kubelet from fetching it, so the container can never start. IfNotPresent pulls the image once and afterwards uses the local copy, exactly as Never does when the image is there.", ctr.Image),
+		Risk:       "low",
+		Warnings:   []string{"Never is sometimes set on purpose, for images loaded onto nodes by hand. If no registry the node can reach has this image, the pull will fail and verification will report it."},
+		Reversible: true,
+	}
+	return p.finish(ctx, c, inc, a)
+}
+
 // --- tune-probe ---
 
 func (p *Planner) planProbe(ctx context.Context, c *fleet.Cluster, inc *incident.Incident) Plan {
@@ -199,6 +303,27 @@ func (p *Planner) planProbe(ctx context.Context, c *fleet.Cluster, inc *incident
 	probe := probeOf(ctr, inc.Probe)
 	if probe == nil {
 		return manual("Container %q no longer has a %s probe.", inc.Container, inc.Probe)
+	}
+	if inc.Probe == "readiness" {
+		old := max(probe.TimeoutSeconds, 1)
+		if old >= 30 {
+			return manual("The readiness probe already allows %ds for an answer. A check slower than that points at the application, not the probe.", old)
+		}
+		timeout := min(max(old*5, 5), 30)
+		a := &incident.Action{
+			Type:       incident.ActionTuneProbe,
+			TargetKind: inc.Workload.Kind, TargetName: inc.Workload.Name,
+			Params: map[string]string{
+				"container": inc.Container, "probe": inc.Probe,
+				"initialDelaySeconds": strconv.Itoa(int(probe.InitialDelaySeconds)), "timeoutSeconds": strconv.Itoa(int(timeout)),
+			},
+			Title:      fmt.Sprintf("Give the readiness probe of container %q longer to answer: timeout %ds to %ds", inc.Container, old, timeout),
+			Rationale:  fmt.Sprintf("The container is running, but its readiness check does not answer within the %ds deadline, so the pod receives no traffic. The probe target is unchanged; only the deadline is longer.", old),
+			Risk:       "low",
+			Warnings:   []string{"If the check is slow because the application is overloaded, a longer deadline hides that rather than fixing it."},
+			Reversible: true,
+		}
+		return p.finish(ctx, c, inc, a)
 	}
 	delay := max(probe.InitialDelaySeconds*2, 30)
 	timeout := max(probe.TimeoutSeconds, 5)
@@ -229,6 +354,8 @@ func probeOf(c *corev1.Container, kind string) *corev1.Probe {
 		return c.LivenessProbe
 	case "startup":
 		return c.StartupProbe
+	case "readiness":
+		return c.ReadinessProbe
 	}
 	return nil
 }
@@ -242,6 +369,9 @@ type revisionPair struct {
 	// prevReady is how many pods of the previous revision are still
 	// ready, when that is knowable (Deployments only).
 	prevReady int32
+	// curShort reports that the latest revision has fewer pods than it
+	// wants, which is what a refused pod creation looks like.
+	curShort bool
 	// onCurrent reports whether a pod belongs to the latest revision.
 	onCurrent func(*corev1.Pod) bool
 }
@@ -274,6 +404,7 @@ func revisions(c *fleet.Cluster, inc *incident.Incident) (*revisionPair, metav1.
 		return &revisionPair{
 			cur: revision(cur), prev: revision(prev), curTmpl: &cur.Spec.Template, prevTmpl: tmpl,
 			prevReady: prev.Status.ReadyReplicas,
+			curShort:  cur.Status.Replicas < replicas(cur.Spec.Replicas),
 			onCurrent: func(p *corev1.Pod) bool { return metav1.IsControlledBy(p, cur) },
 		}, d, true
 
@@ -316,6 +447,7 @@ func revisions(c *fleet.Cluster, inc *incident.Incident) (*revisionPair, metav1.
 		}
 		return &revisionPair{
 			cur: cur.Revision, prev: prev.Revision, curTmpl: curTmpl, prevTmpl: prevTmpl,
+			curShort: true,
 			onCurrent: func(p *corev1.Pod) bool {
 				return metav1.IsControlledBy(p, owner) && p.Labels[appsv1.ControllerRevisionHashLabelKey] == hash
 			},
@@ -361,9 +493,21 @@ func (p *Planner) planRollback(ctx context.Context, c *fleet.Cluster, inc *incid
 		return Plan{}, false
 	}
 	onCurrent := false
+	var failing []*corev1.Pod
 	for _, name := range inc.Pods {
 		if pod, err := c.Pods.Pods(inc.Namespace).Get(name); err == nil && rev.onCurrent(pod) {
 			onCurrent = true
+			failing = append(failing, pod)
+		}
+	}
+	if inc.Family == detect.FamilyAdmission {
+		// No pod exists to inspect. A rollback helps when it is the
+		// latest revision that is refused and the earlier one is known
+		// to be acceptable: it is still running, or it names a
+		// different ServiceAccount than the one that is missing.
+		onCurrent = rev.curShort && rev.prevReady > 0
+		if inc.Cause == detect.CauseServiceAccount {
+			onCurrent = rev.curShort && rev.curTmpl.Spec.ServiceAccountName != rev.prevTmpl.Spec.ServiceAccountName
 		}
 	}
 	if !onCurrent {
@@ -405,7 +549,30 @@ func (p *Planner) planRollback(ctx context.Context, c *fleet.Cluster, inc *incid
 		Reversible: true,
 		Template:   raw,
 	}
+	if inc.Family == detect.FamilyAdmission {
+		act.Rationale = fmt.Sprintf("The API server refuses to create the pods of revision %d, the latest rollout, so the rollout cannot finish.%s Returning to the revision %d pod template, which was accepted, ends the stuck rollout without kbark needing to guess a forward fix.",
+			rev.cur, serving, rev.prev)
+	}
 	plan := p.finish(ctx, c, inc, act)
+	if plan.Action != nil && kind == "StatefulSet" && len(failing) > 0 {
+		// A StatefulSet waits for a broken pod to become ready before
+		// it touches it again, so reverting the template alone leaves
+		// the broken pod in place. Kubernetes documents this; the pod
+		// has to be deleted for the controller to recreate it from the
+		// restored template.
+		var refs, lines []string
+		for _, pod := range failing {
+			refs = append(refs, pod.Name+"="+string(pod.UID))
+			lines = append(lines, fmt.Sprintf("-pod/%s  (%s)", pod.Name, fleet.PodStatus(pod)))
+		}
+		sort.Strings(refs)
+		sort.Strings(lines)
+		act.Params["pods"] = strings.Join(refs, ",")
+		act.Title += fmt.Sprintf(" and replace %d broken pod(s)", len(failing))
+		act.Rationale += " A StatefulSet does not replace a broken pod on its own after its template is reverted, so the failing pod(s) are deleted as part of this fix and recreated from the restored template; their volumes are kept."
+		act.Diff += fmt.Sprintf("--- namespace/%s pods (current)\n+++ namespace/%s pods (proposed)\n%s\n+%d pod(s) recreated by %s from revision %d\n",
+			inc.Namespace, inc.Namespace, strings.Join(lines, "\n"), len(failing), strings.ToLower(inc.Workload.String()), rev.prev)
+	}
 	return plan, plan.Action != nil
 }
 
@@ -552,7 +719,11 @@ func (p *Planner) finish(ctx context.Context, c *fleet.Cluster, inc *incident.In
 // approved is what is applied.
 func mutation(a *incident.Action) func(*corev1.PodTemplateSpec) error {
 	switch a.Type {
-	case incident.ActionSetMemoryLimit:
+	case incident.ActionSetMemoryLimit, incident.ActionSetEphemeralLimit:
+		name := corev1.ResourceMemory
+		if a.Type == incident.ActionSetEphemeralLimit {
+			name = corev1.ResourceEphemeralStorage
+		}
 		return func(t *corev1.PodTemplateSpec) error {
 			ctr := findContainer(t, a.Params["container"], a.Params["init"] == "true")
 			if ctr == nil {
@@ -562,15 +733,28 @@ func mutation(a *incident.Action) func(*corev1.PodTemplateSpec) error {
 			if err != nil {
 				return err
 			}
-			old := ctr.Resources.Limits[corev1.ResourceMemory]
+			old := ctr.Resources.Limits[name]
 			if ctr.Resources.Limits == nil {
 				ctr.Resources.Limits = corev1.ResourceList{}
 			}
-			ctr.Resources.Limits[corev1.ResourceMemory] = to
-			// Keep a Guaranteed pod Guaranteed.
-			if req, ok := ctr.Resources.Requests[corev1.ResourceMemory]; ok && req.Cmp(old) == 0 {
-				ctr.Resources.Requests[corev1.ResourceMemory] = to
+			ctr.Resources.Limits[name] = to
+			// Keep a request that equalled the limit equal to it, so a
+			// Guaranteed pod stays Guaranteed.
+			if req, ok := ctr.Resources.Requests[name]; ok && req.Cmp(old) == 0 {
+				ctr.Resources.Requests[name] = to
 			}
+			return nil
+		}
+	case incident.ActionSetPullPolicy:
+		return func(t *corev1.PodTemplateSpec) error {
+			ctr := findContainer(t, a.Params["container"], a.Params["init"] == "true")
+			if ctr == nil {
+				return fmt.Errorf("container %q not found", a.Params["container"])
+			}
+			if a.Params["to"] != string(corev1.PullIfNotPresent) {
+				return fmt.Errorf("unsupported pull policy %q", a.Params["to"])
+			}
+			ctr.ImagePullPolicy = corev1.PullIfNotPresent
 			return nil
 		}
 	case incident.ActionTuneProbe:
@@ -604,6 +788,117 @@ func mutation(a *incident.Action) func(*corev1.PodTemplateSpec) error {
 	return func(*corev1.PodTemplateSpec) error {
 		return fmt.Errorf("action %q does not edit a pod template", a.Type)
 	}
+}
+
+// --- fix-service-selector ---
+
+// planServiceSelector proposes pointing a Service at the pods its
+// selector nearly matches. It applies only when the answer is
+// unambiguous: every near-matching pod belongs to one workload and they
+// agree on the label values.
+func (p *Planner) planServiceSelector(ctx context.Context, c *fleet.Cluster, inc *incident.Incident) Plan {
+	svc, err := c.Services.Services(inc.Namespace).Get(inc.Workload.Name)
+	if err != nil {
+		return manual("Could not read service %q: %v", inc.Workload.Name, err)
+	}
+	from := svc.Spec.Selector
+	sel := labels.SelectorFromSet(from)
+	pods, _ := c.Pods.Pods(inc.Namespace).List(labels.Everything())
+	to := map[string]string{}
+	var owner fleet.Ref
+	near := 0
+	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if sel.Matches(labels.Set(pod.Labels)) {
+			return manual("The Service selects pods again.")
+		}
+		if !fleet.NearMatch(from, pod.Labels) {
+			continue
+		}
+		o := c.Owner(pod)
+		if near > 0 && o != owner {
+			return manual("Pods of more than one workload (%s and %s) nearly match the selector, so kbark cannot tell which of them the Service is meant for. Align the selector with the intended pods.", owner, o)
+		}
+		owner = o
+		near++
+		for k := range from {
+			if v, ok := to[k]; ok && v != pod.Labels[k] {
+				return manual("The pods that nearly match the selector disagree on the label %q, so there is no single selector to propose.", k)
+			}
+			to[k] = pod.Labels[k]
+		}
+	}
+	if near == 0 {
+		return manual("No pod nearly matches the Service selector any more.")
+	}
+
+	keys := make([]string, 0, len(from))
+	for k := range from {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var lines, changed []string
+	for _, k := range keys {
+		if from[k] == to[k] {
+			lines = append(lines, fmt.Sprintf("   %s: %s", k, from[k]))
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("-  %s: %s", k, from[k]), fmt.Sprintf("+  %s: %s", k, to[k]))
+		changed = append(changed, fmt.Sprintf("%s=%s to %s=%s", k, from[k], k, to[k]))
+	}
+	fromJSON, _ := json.Marshal(from)
+	toJSON, _ := json.Marshal(to)
+	a := &incident.Action{
+		Type:       incident.ActionFixServiceSelector,
+		TargetKind: "Service", TargetName: svc.Name, TargetUID: string(svc.UID),
+		Params:     map[string]string{"from": string(fromJSON), "to": string(toJSON), "workload": owner.String()},
+		Title:      fmt.Sprintf("Point Service %q at the pods of %s: selector %s", svc.Name, strings.ToLower(owner.String()), strings.Join(changed, ", ")),
+		Rationale:  fmt.Sprintf("The Service selects no pod, so it has no endpoints and every connection to it fails. %d pod(s) of %s carry the same label keys with values that differ from the selector only in case or punctuation, which is what a typing mistake looks like. Changing the selector takes effect at once and restarts nothing.", near, strings.ToLower(owner.String())),
+		Risk:       "medium",
+		Diff:       fmt.Sprintf("--- service/%s spec.selector (current)\n+++ service/%s spec.selector (proposed)\n%s\n", svc.Name, svc.Name, strings.Join(lines, "\n")),
+		Warnings:   []string{"kbark cannot know which side holds the mistake. If the selector is what was intended and the pod labels are wrong, reject this and correct the workload instead."},
+		Reversible: true,
+	}
+	if tool := managedBy(&svc.ObjectMeta); tool != "" {
+		a.Warnings = append(a.Warnings, fmt.Sprintf("This Service is managed by %s. A live change will drift from its source and may be reverted on the next sync; make the same change at the source.", tool))
+	}
+	if p.DryRun {
+		if err := setSelector(ctx, c, inc.Namespace, a, from, to, true); err != nil {
+			return manual("kbark planned to %s, but the API server would not accept it: %v", lowerFirst(a.Title), err)
+		}
+	}
+	return Plan{Action: a}
+}
+
+// setSelector replaces a Service's selector, provided the Service is
+// the one the action was planned for and its selector is still want.
+func setSelector(ctx context.Context, c *fleet.Cluster, ns string, a *incident.Action, want, next map[string]string, dryRun bool) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		svc, err := c.Client.CoreV1().Services(ns).Get(ctx, a.TargetName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if string(svc.UID) != a.TargetUID || !maps.Equal(svc.Spec.Selector, want) {
+			return ErrPrecondition
+		}
+		svc.Spec.Selector = maps.Clone(next)
+		opts := metav1.UpdateOptions{FieldManager: "kbark"}
+		if dryRun {
+			opts.DryRun = []string{metav1.DryRunAll}
+		}
+		_, err = c.Client.CoreV1().Services(ns).Update(ctx, svc, opts)
+		return err
+	})
+}
+
+func selectorParam(a *incident.Action, key string) (map[string]string, error) {
+	var m map[string]string
+	if err := json.Unmarshal([]byte(a.Params[key]), &m); err != nil || len(m) == 0 {
+		return nil, fmt.Errorf("stored selector %q is not usable", key)
+	}
+	return m, nil
 }
 
 // --- uncordon-node ---
@@ -697,12 +992,32 @@ func (p *Planner) planDeletePods(c *fleet.Cluster, inc *incident.Incident) Plan 
 // has changed.
 func Apply(ctx context.Context, c *fleet.Cluster, ns string, a *incident.Action) (*incident.Undo, error) {
 	switch a.Type {
-	case incident.ActionSetMemoryLimit, incident.ActionTuneProbe, incident.ActionRollbackWorkload:
+	case incident.ActionSetMemoryLimit, incident.ActionTuneProbe, incident.ActionRollbackWorkload,
+		incident.ActionSetEphemeralLimit, incident.ActionSetPullPolicy:
 		res, err := editTemplate(ctx, c.Client, ns, a.TargetKind, a.TargetName, a.TargetUID, a.TargetGeneration, modeApply, mutation(a))
 		if err != nil {
 			return nil, err
 		}
-		return &incident.Undo{PrevTemplate: res.Before, AppliedGeneration: res.NewGeneration}, nil
+		undo := &incident.Undo{PrevTemplate: res.Before, AppliedGeneration: res.NewGeneration}
+		if a.Type == incident.ActionRollbackWorkload && a.Params["pods"] != "" {
+			// The template is already restored; a pod that is gone or
+			// replaced by now needs nothing more.
+			if _, err := deletePods(ctx, c, ns, a.Params["pods"]); err != nil {
+				return undo, fmt.Errorf("the template was restored, but a broken pod could not be deleted: %w", err)
+			}
+		}
+		return undo, nil
+
+	case incident.ActionFixServiceSelector:
+		from, err1 := selectorParam(a, "from")
+		to, err2 := selectorParam(a, "to")
+		if err := errors.Join(err1, err2); err != nil {
+			return nil, err
+		}
+		if err := setSelector(ctx, c, ns, a, from, to, false); err != nil {
+			return nil, err
+		}
+		return &incident.Undo{PrevSelector: from}, nil
 
 	case incident.ActionUncordonNode:
 		n, err := c.Client.CoreV1().Nodes().Get(ctx, a.TargetName, metav1.GetOptions{})
@@ -718,22 +1033,9 @@ func Apply(ctx context.Context, c *fleet.Cluster, ns string, a *incident.Action)
 		return &incident.Undo{}, nil
 
 	case incident.ActionDeletePod, incident.ActionRestartPod:
-		deleted := 0
-		for _, ref := range strings.Split(a.Params["pods"], ",") {
-			name, uid, ok := strings.Cut(ref, "=")
-			if !ok {
-				continue
-			}
-			id := types.UID(uid)
-			err := c.Client.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &id}})
-			switch {
-			case err == nil:
-				deleted++
-			case apierrors.IsNotFound(err), apierrors.IsConflict(err):
-				// Already gone, or the name now belongs to a different pod.
-			default:
-				return nil, err
-			}
+		deleted, err := deletePods(ctx, c, ns, a.Params["pods"])
+		if err != nil {
+			return nil, err
 		}
 		if deleted == 0 {
 			return nil, ErrPrecondition
@@ -743,13 +1045,43 @@ func Apply(ctx context.Context, c *fleet.Cluster, ns string, a *incident.Action)
 	return nil, fmt.Errorf("unknown action %q", a.Type)
 }
 
+// deletePods deletes the pods in a "name=uid,name=uid" list, each only
+// if it is still the pod that was shown to the approver.
+func deletePods(ctx context.Context, c *fleet.Cluster, ns, refs string) (int, error) {
+	deleted := 0
+	for _, ref := range strings.Split(refs, ",") {
+		name, uid, ok := strings.Cut(ref, "=")
+		if !ok {
+			continue
+		}
+		id := types.UID(uid)
+		err := c.Client.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &id}})
+		switch {
+		case err == nil:
+			deleted++
+		case apierrors.IsNotFound(err), apierrors.IsConflict(err):
+			// Already gone, or the name now belongs to a different pod.
+		default:
+			return deleted, err
+		}
+	}
+	return deleted, nil
+}
+
 // Rollback reverses an applied action using the saved Undo.
 func Rollback(ctx context.Context, c *fleet.Cluster, ns string, a *incident.Action, undo *incident.Undo) error {
 	if undo == nil {
 		return errors.New("this action cannot be rolled back")
 	}
 	switch a.Type {
-	case incident.ActionSetMemoryLimit, incident.ActionTuneProbe, incident.ActionRollbackWorkload:
+	case incident.ActionFixServiceSelector:
+		to, err := selectorParam(a, "to")
+		if err != nil {
+			return err
+		}
+		return setSelector(ctx, c, ns, a, to, undo.PrevSelector, false)
+	case incident.ActionSetMemoryLimit, incident.ActionTuneProbe, incident.ActionRollbackWorkload,
+		incident.ActionSetEphemeralLimit, incident.ActionSetPullPolicy:
 		_, err := editTemplate(ctx, c.Client, ns, a.TargetKind, a.TargetName, a.TargetUID, undo.AppliedGeneration, modeApply,
 			func(t *corev1.PodTemplateSpec) error {
 				var prev corev1.PodTemplateSpec
@@ -786,6 +1118,10 @@ func Stale(c *fleet.Cluster, ns string, a *incident.Action) bool {
 	case "Node":
 		n, err := c.Nodes.Get(a.TargetName)
 		return err != nil || string(n.UID) != a.TargetUID || !n.Spec.Unschedulable
+	case "Service":
+		svc, err := c.Services.Services(ns).Get(a.TargetName)
+		from, perr := selectorParam(a, "from")
+		return err != nil || perr != nil || string(svc.UID) != a.TargetUID || !maps.Equal(svc.Spec.Selector, from)
 	default:
 		return false
 	}
@@ -829,8 +1165,14 @@ func Settled(c *fleet.Cluster, ns string, a *incident.Action) (bool, string) {
 // HoldFor returns how long the failure must stay clear after an action
 // before it counts as fixed. A relaxed probe proves nothing until the
 // probe has had time to run and fail, so that action waits out the new
-// initial delay plus a margin for a few probe periods.
+// initial delay plus a margin for a few probe periods. A raised disk
+// limit likewise proves nothing until the container has written again.
 func HoldFor(a *incident.Action, base time.Duration) time.Duration {
+	if a.Type == incident.ActionSetEphemeralLimit {
+		// A container needs time to fill its disk again, and the node
+		// checks usage only periodically.
+		return max(base, time.Minute)
+	}
 	if a.Type == incident.ActionTuneProbe {
 		if delay, err := strconv.Atoi(a.Params["initialDelaySeconds"]); err == nil {
 			return max(base, time.Duration(delay)*time.Second+30*time.Second)

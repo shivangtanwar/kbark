@@ -8,7 +8,8 @@
 #   demo/demo.sh down                    delete both Kind clusters
 #
 # Scenarios: oom, bad-image, crash, missing-config, fix-config, slow-start,
-#            cordon, evicted, selector
+#            cordon, evicted, selector, never-pull, disk, slow-ready,
+#            no-account, stuck-pod, sts-crash
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,6 +79,29 @@ cmd_break() {
         -p '{"status":{"phase":"Failed","reason":"Evicted","message":"The node was low on resource: memory. Threshold quantity: 100Mi, available: 62Mi."}}' ;;
     selector)
       k apply -f "$FIX/selector-mismatch.yaml" ;;
+    never-pull)
+      k apply -f "$FIX/never-pull.yaml" ;;
+    disk)
+      k apply -f "$FIX/disk.yaml" ;;
+    slow-ready)
+      k apply -f "$FIX/slow-ready.yaml" ;;
+    no-account)
+      k apply -f "$FIX/gateway-v1.yaml"
+      k -n "$NS" rollout status deploy/gateway --timeout=90s
+      k apply -f "$FIX/gateway-v2.yaml" ;;
+    stuck-pod)
+      # Corrupts the local state of one "sessions" pod. kbark replaces a
+      # single pod only when its siblings have been ready for five
+      # minutes, so run this at least that long after "up" or "reset".
+      local pod
+      pod="$(k -n "$NS" get pods -l app=sessions --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
+      [ -n "$pod" ] || { echo "no running sessions pod; run 'up' or 'reset' first" >&2; exit 1; }
+      k -n "$NS" exec "$pod" -- touch /state/corrupt
+      echo "corrupted the local state of $pod" ;;
+    sts-crash)
+      k apply -f "$FIX/ledger-v1.yaml"
+      k -n "$NS" rollout status statefulset/ledger --timeout=90s
+      k apply -f "$FIX/ledger-v2.yaml" ;;
     *)
       echo "unknown scenario: $scenario" >&2; exit 2 ;;
   esac
@@ -107,5 +131,5 @@ case "${1:-}" in
   reset) shift; cmd_reset "$@" ;;
   status) cmd_status ;;
   down) cmd_down ;;
-  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
