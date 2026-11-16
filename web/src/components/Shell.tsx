@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useLive } from '../lib/live';
 import { groupOf } from '../lib/vocab';
+import { ErrorBoundary } from './ErrorBoundary';
 import { Input } from './ui';
 
 function Logo() {
@@ -104,7 +105,7 @@ export function Shell({ title, crumb }: { title: string; crumb?: ReactNode }) {
             </select>
           </label>
         </header>
-        <main className="anim-rise flex flex-col gap-4 px-4 pb-12 pt-5 md:px-7" key={loc.pathname}><Outlet /></main>
+        <main className="anim-rise flex flex-col gap-4 px-4 pb-12 pt-5 md:px-7" key={loc.pathname}><ErrorBoundary><Outlet /></ErrorBoundary></main>
       </div>
     </div>
   );

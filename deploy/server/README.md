@@ -47,7 +47,7 @@ To ship a new build, copy the new `bin/kbark` and run
 ## AI explanations
 
 `config/kbark/config.yaml` points kbark at an OpenAI-compatible endpoint
-(here a LiteLLM proxy on the same Docker host). Put that endpoint's key in
+(set `base_url` and `model` there for the endpoint you use). Put that endpoint's key in
 `~/kbark/kbark.env` as `KBARK_AI_API_KEY=...` and restart the container.
 Without a key kbark runs normally and the Explanation card says so.
 

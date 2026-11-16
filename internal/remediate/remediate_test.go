@@ -59,6 +59,9 @@ func TestMemoryFixAppliesAndRollsBack(t *testing.T) {
 	if a.Type != incident.ActionSetMemoryLimit || a.Params["to"] != "128Mi" {
 		t.Fatalf("unexpected action %s %v", a.Type, a.Params)
 	}
+	if !strings.Contains(a.Rationale, "request equals the limit") {
+		t.Errorf("the rationale must say the request is raised too: %s", a.Rationale)
+	}
 	if !strings.Contains(a.Diff, "-        memory: 64Mi") || !strings.Contains(a.Diff, "+        memory: 128Mi") {
 		t.Errorf("diff does not show the limit change:\n%s", a.Diff)
 	}

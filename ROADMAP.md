@@ -27,9 +27,11 @@ the first publicly tagged release.
   (or in-cluster) and opens an incident for each detected failure
 - Deterministic detectors for out-of-memory kills, crashes, image pull
   failures, missing configuration, probe failures, scheduling,
-  storage, evictions and Service selector mismatches
-- Six typed fixes (raise memory limit, roll back a Deployment,
-  StatefulSet or DaemonSet, relax probe timing, delete a dead pod,
+  storage, evictions, local disk limits, Service selector mismatches
+  and pods refused at creation
+- Nine typed fixes (raise a memory or ephemeral-storage limit, roll
+  back a Deployment, StatefulSet or DaemonSet, relax probe timing,
+  allow an image pull, correct a Service selector, delete a dead pod,
   replace an unhealthy pod, uncordon a node), each previewed as a
   dry-run diff and applied only after approval
 - Verification after every fix, exact rollback, an attempt limit and

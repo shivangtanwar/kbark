@@ -3,6 +3,8 @@
 package incident
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,5 +117,22 @@ func TestAuditRecordsDiffOnProposalAndApproval(t *testing.T) {
 	}
 	if audit.Err() != "" {
 		t.Fatalf("audit write failed: %s", audit.Err())
+	}
+}
+
+func TestIncidentWithoutPodsSerializesAnEmptyList(t *testing.T) {
+	s := NewStore(nil, nil)
+	ref := fleet.Ref{Kind: "Deployment", Name: "api"}
+	created := s.Observe("a", []fleet.Observation{{
+		Key: fleet.Key("shop", ref, detect.FamilyAdmission), Namespace: "shop", Workload: ref,
+		Finding: detect.Finding{Family: detect.FamilyAdmission, Summary: "pods cannot be created"},
+	}}, time.Now())
+	raw, err := json.Marshal(created[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The console iterates this field; null would break every page that does.
+	if !strings.Contains(string(raw), `"pods":[]`) {
+		t.Fatalf("want an empty list for pods, got %s", raw)
 	}
 }

@@ -191,7 +191,7 @@ export function IncidentDetail() {
             ['Incident', <Mono>{i.id}</Mono>],
             ['Workload', <Mono>{workloadName(i)}</Mono>],
             ...(a ? [['Action', actionName(a.type)], ['Reversible', a.reversible ? 'Yes' : 'No']] as [string, ReactNode][] : []),
-            [i.workload.kind === 'Service' ? 'Related pods' : 'Pods', <Mono>{i.pods.join(', ') || '–'}</Mono>],
+            [i.workload.kind === 'Service' ? 'Related pods' : 'Pods', <Mono>{(i.pods ?? []).join(', ') || '–'}</Mono>],
             ['Opened', `${clock(i.openedAt)} (${ago(i.openedAt, now)} ago)`],
           ]} />
         </Card>

@@ -16,7 +16,7 @@ export function Pods() {
   const scoped = useScoped(state?.pods);
   const incidentOf = useMemo(() => {
     const m = new Map<string, string>();
-    for (const i of state?.incidents ?? []) if (!i.closedAt) for (const p of i.pods) m.set(`${i.cluster}/${i.namespace}/${p}`, i.id);
+    for (const i of state?.incidents ?? []) if (!i.closedAt) for (const p of i.pods ?? []) m.set(`${i.cluster}/${i.namespace}/${p}`, i.id);
     return m;
   }, [state]);
   const rows = useMemo(() => {

@@ -97,7 +97,7 @@ crash-looping pod looks healthy for a few seconds on every restart.
 
 ### The allowlisted actions
 
-kbark can perform only these six writes. Each is a typed struct, not a command
+kbark can perform only these nine writes. Each is a typed struct, not a command
 string, so nothing a language model says can become an action.
 
 | Action | API call | Used for | Reversible by |
@@ -108,6 +108,15 @@ string, so nothing a language model says can become an action.
 | `tune-probe` | update probe timing in the pod template | liveness kills on slow start | restoring the saved template |
 | `delete-pod` | delete pod (UID precondition) | evicted pods left behind | not reversible; the pod was already dead |
 | `uncordon-node` | patch `spec.unschedulable=false` | pods pending on a cordoned node | cordoning again |
+| `set-ephemeral-storage-limit` | update workload pod template | pods evicted for exceeding their local disk limit | restoring the saved template |
+| `set-image-pull-policy` | update workload pod template (`Never` to `IfNotPresent`) | an image absent from the node that the kubelet may not pull | restoring the saved template |
+| `fix-service-selector` | update the Service's selector | a Service whose selector nearly matches the pods of exactly one workload | restoring the saved selector |
+
+`tune-probe` also covers a readiness probe that times out (it raises only
+the timeout), and `rollback-workload` also covers pods that the API server
+refuses to create on the latest revision. A StatefulSet rollback deletes the
+broken pods after restoring the template, because a StatefulSet does not
+replace them by itself.
 
 ### Guardrails
 
@@ -160,11 +169,16 @@ scope and need to be updated by hand.
 
 ## 4. Development: what was built
 
-- Detectors for nine failure families with 27 table-driven test cases.
+- Detectors for eleven failure families (nine from pod state, plus Services
+  without endpoints and pods refused at creation), table-driven tests.
 - Multi-cluster watchers over kubeconfig contexts, plus an in-cluster mode.
 - Incident store, audit log, and the scan/plan/approve/verify engine.
-- All six actions, each with plan, dry-run, apply and (where meaningful)
+- All nine actions, each with plan, dry-run, apply and (where meaningful)
   rollback.
+- The engine plans a "no automatic fix" incident again every 30 seconds
+  while the failure is observed, and asks again for an explanation that
+  was unavailable, so neither is stuck with a first answer that has
+  stopped being true.
 - Web console in React and TypeScript, dark and light themes: overview with
   KPI tiles and health and incident trends, incidents, incident detail with
   evidence, explanation, diff and an approval dialog, clusters, pods, audit
@@ -174,7 +188,7 @@ scope and need to be updated by hand.
 - `kbark incidents` terminal client: list, show, approve, reject, rollback.
 - AI explanation through the existing providers or any OpenAI-compatible
   endpoint (`base_url` and `api_key_env` in a profile); optional.
-- Demo environment: `demo/demo.sh` with nine scenarios.
+- Demo environment: `demo/demo.sh` with fifteen scenarios.
 - Deployment files: `Dockerfile`, `deploy/rbac.yaml`, `deploy/kbark.yaml`.
 
 Not built: an incident screen inside the terminal UI (the CLI client covers
@@ -257,9 +271,26 @@ showing.
 | 4:20 | Rollback and audit | click Roll back on the memory fix | Audit log tab: who approved what, with the diff |
 | 4:50 | Close | | Fix-outcome table; limits |
 
-Other scenarios available: `slow-start` (probe timing), `cordon`
-(uncordon a node), `evicted` (delete a dead pod record), `selector`
-(Service selector typo, manual).
+Other scenarios available:
+
+| Scenario | Failure | Proposed fix |
+|---|---|---|
+| `slow-start` | liveness probe kills a slow starter | relax probe timing |
+| `slow-ready` | readiness check slower than its deadline | raise the readiness timeout |
+| `cordon` | pods pending on a cordoned node | uncordon the node |
+| `evicted` | a dead pod record | delete it |
+| `selector` | Service selector typo | correct the selector |
+| `never-pull` | image absent, pull policy `Never` | allow the pull |
+| `disk` | eviction for exceeding the local disk limit | raise the limit, then a second proposal deletes the dead records |
+| `no-account` | rollout names a ServiceAccount that does not exist; no pod is ever created | roll back |
+| `sts-crash` | crashing StatefulSet rollout | roll back and replace the broken pod |
+| `stuck-pod` | one of three pods has corrupt local state | replace that pod (needs the `sessions` pods to be five minutes old) |
+
+`selector`, `no-account` and `sts-crash` propose medium-risk changes, which
+the server's policy does not allow on `kbark-staging`; run them on
+`kbark-dev`. For a local run with explanations, put `KBARK_AI_API_KEY` in
+`~/.config/kbark/kbark.env` and start `task serve -- --profile codex` (the
+profile points at the same OpenAI-compatible endpoint the server uses).
 
 Fallbacks: detection and fixes do not need the AI provider, so a provider
 outage changes nothing but the explanation panel. If one cluster fails, run
@@ -314,17 +345,32 @@ Verified by running:
 - AI explanations against a real provider (an OpenAI-compatible endpoint,
   model `gpt-6.1-sol`) on the server: explanations quote the evidence and the
   container log. One explanation misstated the memory request; the model is
-  now given the exact diff, and that correction has not been re-observed.
+  now given the exact diff, and a later explanation of the same fix stated
+  correctly that the limit and the request both go from 64Mi to 128Mi.
 - Automatic re-planning: an incident left as "no automatic fix" because its
   Deployment was briefly missing returned to a proposal by itself.
+
+- The five recoveries added last, on the laptop's Kind cluster and again on
+  the server under the restricted service account: pull policy, local disk
+  limit followed by deletion of the dead records, Service selector (applied,
+  rolled back, detected again, applied again), readiness timeout, and
+  rollback of a rollout whose pods were refused for a missing
+  ServiceAccount. All verified.
+- `restart-pod` and StatefulSet rollback on a live cluster, both places:
+  one pod of three replaced, and `ledger-1` recreated on revision 1.
+- A local run with AI explanations through the `codex` profile.
 
 Not verified:
 
 - `--confirm-oom`: the metric parser is tested, but the Kind runtime never
   reports out-of-memory events, so a confirmation has not been observed.
-- The `restart-pod` action and StatefulSet rollback on a live cluster (both
-  have automated tests against a fake cluster only). DaemonSet rollback has
-  no test.
+- DaemonSet rollback on a live cluster (automated test against a fake
+  cluster only).
+- Refused pod creation for causes other than a missing ServiceAccount (Pod
+  Security, LimitRange, quota, webhook): classification is tested from
+  message text, not produced on a cluster.
+- A Service selector fix where two workloads nearly match (automated test
+  only).
 - `golangci-lint`: the installed binary could not type-check this Go version.
   `go vet` and `gofmt` are clean.
 - The multi-stage `Dockerfile`.

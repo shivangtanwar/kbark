@@ -46,7 +46,12 @@ Each of these was observed on the Kind clusters during development on
 | 14 | The server's default limit of 128 inotify instances is below what two Kind clusters like. | A kernel default sized for desktops. | Both clusters did start; the root install script raises the limit to 512 so it is not marginal. |
 | 15 | After a namespace was deleted and recreated, an incident stayed "no automatic fix" with the reason "deployment not found", although the Deployment was back. | kbark re-planned during the seconds the Deployment did not exist, and incidents without a fix were never planned again. | Such incidents are planned again every 30 seconds while the failure is observed; the record changes only if the answer does. |
 | 16 | An AI explanation said the memory request "remains 64Mi" when the fix raises it with the limit. | The model was given the fix's title and rationale, not the change itself. | The exact diff is now part of what the model sees. This is also a reminder of why the model only advises: the diff the approver signs was correct throughout. |
-| 10 | Real evictions cannot be produced safely on a one-node Kind cluster. | Eviction needs a node under memory or disk pressure. | The `evicted` scenario creates a pod that is never scheduled and writes the status the kubelet writes on eviction. kbark's detector and delete action run exactly as they would after a real eviction. |
+| 17 | A StatefulSet rollback would have restored the template and then failed verification. | With ordered pod management a StatefulSet does not replace a broken pod after its template is reverted; Kubernetes documents this. Found while writing the live test, before running it. | The rollback proposal for a StatefulSet now names the broken pods and deletes them after the template is restored. Run live: `ledger-1` came back on revision 1. |
+| 18 | Raising a disk limit could never be verified, because the evicted pods stay in the list as `Failed` and kept the finding alive. | One finding covered two different facts: "the limit is too low" and "dead records exist". | They are separate families. An eviction counts as a disk-limit failure only while the workload still has the limit the pod was evicted under; afterwards the pod is a dead record with its own delete proposal. |
+| 19 | From outside the host, the console took several seconds to appear. | The 700 KB script was sent uncompressed; nginx was not configured to compress and neither was kbark. | kbark compresses scripts and styles itself (206 KB on the wire), so it does not depend on the proxy. |
+| 20 | During those seconds the Incidents page said "No incidents match". | The page treated "no data yet" as "no incidents". | A loading placeholder is shown until the first snapshot arrives. |
+| 21 | An explanation quoted "unable to retrieve container logs" as if it were the application's output. | When a container's log file is gone, the kubelet answers successfully with that sentence as the body. | That body is no longer treated as a log. |
+| 10 | Real evictions cannot be produced safely on a one-node Kind cluster. | Eviction needs a node under memory or disk pressure. | The `evicted` scenario creates a pod that is never scheduled and writes the status the kubelet writes on eviction. kbark's detector and delete action run exactly as they would after a real eviction. Evictions for exceeding a container's own ephemeral-storage limit are real on Kind, and the `disk` scenario uses them. |
 
 Other difficulties the team met outside this build (earlier milestones,
 environment setup) should be added here by the team; they cannot be
@@ -70,14 +75,16 @@ Two rules apply to every family:
 |---|---|---|---|
 | 1 | Out of memory | `OOMKilled`, exit 137 | Raise memory limit |
 | 2 | Application crash | `CrashLoopBackOff`, non-zero exit | Replace the pod if its siblings are healthy; roll back if the failing pods are on the latest rollout; otherwise Manual |
-| 3 | Image pull | `ErrImagePull`, `ImagePullBackOff` | Roll back if the latest rollout changed the image; otherwise Manual |
+| 3 | Image pull | `ErrImagePull`, `ImagePullBackOff`, `ErrImageNeverPull` | Roll back if the latest rollout changed the image; allow the pull if the policy is `Never` and the image is absent; otherwise Manual |
 | 4 | Missing configuration | `CreateContainerConfigError` | Roll back if the failing pods are on the latest rollout; otherwise Manual |
 | 5 | Init container failure | `Init:CrashLoopBackOff`, `Init:Error` | Same as the matching family above |
-| 6 | Health probe failure | Restarts with `Unhealthy` events; `Ready=False` | Replace the pod if its siblings are healthy; relax probe timing for slow starts; roll back if the latest rollout changed the probe |
+| 6 | Health probe failure | Restarts with `Unhealthy` events; `Ready=False` | Replace the pod if its siblings are healthy; relax probe timing for slow starts and for readiness checks that time out; roll back if the latest rollout changed the probe |
 | 7 | Scheduling | `Pending`, `FailedScheduling` | Uncordon a cordoned node; roll back a bad rollout; otherwise Manual |
 | 8 | Storage | `Pending` or `ContainerCreating` with `FailedMount` | Manual |
 | 9 | Eviction and node pressure | `Evicted`, `Failed` | Delete the dead pod records; node pressure itself is not addressed |
-| 10 | Network and service | Running but unreachable | Manual |
+| 10 | Network and service | Running but unreachable | Correct a Service selector that nearly matches the pods of one workload; otherwise Manual |
+| 11 | Local disk limit | `Evicted`, message names ephemeral storage | Raise the ephemeral-storage limit; the dead records are then handled as family 9 |
+| 12 | Pods refused at creation | Fewer pods than wanted, `FailedCreate` on the controller | Roll back if an accepted revision exists; otherwise Manual (always Manual for a full quota) |
 
 Family 5 is not a separate detector: the detectors for families 1 to 4 run
 over init containers as well and mark the finding as an init container.
@@ -156,8 +163,13 @@ message and pull events are classified as a bad reference ("not found",
 registry problem (timeouts, DNS failures, rate limits).
 
 **Fix.** If the latest rollout changed this container's image and an earlier
-revision exists, `rollback-workload`. Otherwise Manual, with a reason that
-matches the classification. kbark cannot create credentials and must not.
+revision exists, `rollback-workload`. If the status is `ErrImageNeverPull`
+(the image is not on the node and the pull policy `Never` forbids fetching
+it), `set-image-pull-policy` changes the policy to `IfNotPresent`, which
+behaves identically once the image is present. The proposal warns that
+`Never` is sometimes deliberate, for images loaded onto nodes by hand.
+Otherwise Manual, with a reason that matches the classification. kbark
+cannot create credentials and must not.
 
 ### 4. Missing configuration (CreateContainerConfigError)
 
@@ -217,8 +229,12 @@ family 2. Otherwise, liveness or startup failures with timeouts or refused conne
 `tune-probe`, which doubles the initial delay (at least 30 seconds, at most
 300) and sets the timeout to at least 5 seconds. If the latest rollout
 changed the probe or the container's ports, `rollback-workload` is preferred.
+A readiness probe whose check times out (the event says "timed out" or
+"deadline exceeded") is also a timing problem: `tune-probe` raises only its
+timeout (1 second to 5, at most 30) and leaves everything else alone.
 Probes answered with an HTTP error by the application, and readiness
-failures with no earlier revision: Manual.
+failures of any other kind with no earlier revision: Manual. A longer
+deadline would only hide an application that answers "not ready".
 
 ### 7. Scheduling failure (Pending)
 
@@ -268,7 +284,9 @@ ephemeral storage filling the disk; a noisy neighbour.
 **Fix.** `delete-pod` for the dead records, with a UID precondition so a
 different pod of the same name is never deleted. This is the one action that
 cannot be undone, and it changes nothing that is running. The pressure on
-the node is not addressed.
+the node is not addressed. An eviction whose message names the container's
+own ephemeral-storage limit is a different failure with a real fix; see
+family 11.
 
 ### 10. Network and service failure
 
@@ -283,8 +301,61 @@ traffic; DNS failures.
 matches no pod while some pod's labels are a near miss for it. Wrong ports,
 NetworkPolicies and DNS failures are not detected.
 
-**Fix.** Manual, with the selector and the near-miss pods shown. kbark
-cannot tell which side is wrong.
+**Fix.** `fix-service-selector`, when the answer is unambiguous: every
+near-miss pod belongs to one workload and they agree on the label values.
+The Service's selector is changed to those values; nothing restarts, and the
+previous selector is stored for an exact rollback. kbark cannot know which
+side holds the typing mistake, and the proposal says so: if the selector is
+what was intended, the approver rejects it and corrects the workload. When
+pods of two workloads nearly match, or they disagree, the incident is
+Manual. The write is guarded by the Service's UID and by its selector still
+being the one that was shown.
+
+### 11. Local disk limit (ephemeral storage)
+
+**What happens.** A container writes more to local disk (its writable
+layer, logs, `emptyDir` volumes) than its `ephemeral-storage` limit. The
+kubelet evicts the pod; the controller starts a replacement, which fills up
+and is evicted in turn. Dead pod records pile up, one per cycle.
+
+**Common causes.** A limit sized for an empty cache; unrotated logs; a
+spool or temporary directory that grows with load.
+
+**Detection.** A `Failed` pod with reason `Evicted` whose message says the
+container (or the pod, when exactly one container has a limit) exceeded its
+local ephemeral storage limit, while the workload still gives that container
+the same limit. Once the workload's limit has changed, the same dead pods
+are only records, and they are reported as family 9 instead.
+
+**Fix.** `set-ephemeral-storage-limit` doubles the limit, up to a 2Gi
+ceiling, keeping a request that equalled the limit equal to it. The fix is
+held for a minute before it counts as verified, because a container needs
+time to fill its disk again. After it holds, kbark opens a separate incident
+proposing `delete-pod` for the records that were left behind: two approvals,
+each for one plain change. At the ceiling: Manual, because a container that
+needs that much local disk should be writing to a volume.
+
+### 12. Pods refused at creation
+
+**What happens.** The controller asks the API server for a pod and is
+refused. No pod exists, so nothing shows as crashing; the workload simply
+has fewer pods than it wants, or a rollout never finishes.
+
+**Common causes.** The pod names a ServiceAccount that does not exist; the
+spec violates the namespace's Pod Security level; resources fall outside a
+LimitRange; the ResourceQuota is used up; an admission webhook rejects it.
+
+**Detection.** A ReplicaSet, StatefulSet or DaemonSet with fewer pods than
+it wants and a `FailedCreate` event in the last 20 minutes. The event
+message is classified into the causes above. This is the only detector that
+does not start from a pod.
+
+**Fix.** `rollback-workload`, when it is the latest revision that is refused
+and the earlier one is known to be acceptable: its pods are still running,
+or (for a missing ServiceAccount) it names a different account. A full
+quota is always Manual: abandoning the rollout would clear the symptom, but
+the decision is about capacity. kbark never creates ServiceAccounts, loosens
+a security level or edits a quota.
 
 ## Why "roll back" appears so often
 
@@ -296,6 +367,14 @@ kbark therefore prefers rollback whenever revision history supports it, and
 declines to invent a forward fix when it does not. kbark does not know that
 the earlier revision was healthy; verification after the rollback is what
 establishes that.
+
+A StatefulSet needs one more step. With its default ordered pod management
+it waits for a broken pod to become ready before touching it again, so
+reverting the template leaves the broken pod in place indefinitely (the
+Kubernetes documentation calls this a forced rollback and tells the operator
+to delete the pod). kbark's StatefulSet rollback therefore lists the failing
+pods in the proposal and deletes them, by UID, right after the template is
+restored. Their volumes are untouched.
 
 ## Fix-outcome table
 
@@ -314,13 +393,24 @@ verification hold (15 seconds; 60 for the probe fix).
 | `evicted` | kbark-dev | Evicted pod | Delete dead pod | Verified | 47s |
 | `cordon` | kbark-staging | Scheduling, cordoned node | Uncordon node | Verified | 30s |
 | `missing-config` | kbark-dev | Missing ConfigMap `reports-config` | None (Manual) | Cleared on its own after the ConfigMap was created | — |
-| `selector` | kbark-dev | Service selector matches no pod | None (Manual) | Still open | — |
+| `selector`, before the selector fix existed | kbark-dev | Service selector matches no pod | None (Manual) | Left open | — |
 | `oom`, kbark running in-cluster | kbark-staging | Out of memory (inferred) | Memory limit 64Mi to 128Mi | Verified | 38s |
 | `cordon`, kbark running in-cluster | kbark-staging | Scheduling, cordoned node | Uncordon node | Verified | 17s |
 | `evicted`, kbark running in-cluster | kbark-staging | Evicted pod | Delete dead pod | Verified | 38s |
 | `crash`, kbark on the server (demo.kbark.dev host) | kbark-dev | Application crash | Roll back revision 2 to 1 | Verified | 20s |
 | `oom`, kbark on the server | kbark-staging | Out of memory (inferred) | Memory limit 64Mi to 128Mi | Verified | 39s |
 | `bad-image`, kbark on the server | kbark-staging | Image pull, bad reference | None: the server's policy forbids rollback on staging | Manual, with the policy named | — |
+| `selector` | kbark-dev (laptop) | Service selector matches no pod | Selector `app=check-out` to `app=checkout` | Verified; then rolled back, detected again and fixed again | 1m37s |
+| `never-pull` | kbark-dev (laptop) | Image pull, policy `Never` | Pull policy `Never` to `IfNotPresent` | Verified | 1m48s |
+| `disk` | kbark-dev (laptop) | Local disk limit | Ephemeral-storage limit 16Mi to 32Mi | Verified; a second incident then proposed deleting the 2 dead records, verified | 1m14s |
+| `slow-ready` | kbark-dev (laptop) | Readiness probe, timeout | Readiness timeout 1s to 5s | Verified | 59s |
+| `no-account` | kbark-dev (laptop) | Pods refused: ServiceAccount missing | Roll back revision 2 to 1 | Verified | 1m38s |
+| `sts-crash` | kbark-dev (laptop) | Application crash on a StatefulSet | Roll back revision 2 to 1 and replace the broken pod | Verified | 1m19s |
+| `stuck-pod` | kbark-dev (laptop) | Application crash, one pod of three | Replace the pod | Verified | 26s |
+| The same seven scenarios, kbark on the server with its restricted service account | kbark-dev | As above | As above | All verified; the `disk` follow-up deleted 49 dead records | Not comparable: approval was delayed about 28 minutes |
+
+The recovery times in the laptop rows include about a minute between
+detection and approval, because all proposals were approved together.
 
 Two older bare pods in the `default` namespace of kbark-dev (`cause-crash`,
 `bad-image`, the v0.1 demo fixtures) were also detected and correctly marked

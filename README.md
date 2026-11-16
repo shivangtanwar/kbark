@@ -27,7 +27,7 @@ What happens when a pod fails:
 
 1. **Detect.** Detectors written in Go read pod status and events. No AI
    is involved in deciding what is wrong.
-2. **Propose.** A fixed playbook picks one of six typed fixes, or says
+2. **Propose.** A fixed playbook picks one of nine typed fixes, or says
    that no safe automatic fix exists and why.
 3. **Approve.** The dashboard shows the evidence, an optional AI
    explanation, and the change as a diff validated by the API server as
@@ -45,7 +45,12 @@ What happens when a pod fails:
 | Liveness probe killing a slow starter | Relax probe timing |
 | Evicted pods left behind | Delete the dead pod records |
 | Pods pending on a cordoned node | Uncordon the node |
-| Storage, network, credentials, application bugs | None: explained and left to a person |
+| Readiness check slower than its deadline | Raise the readiness timeout |
+| Evicted for exceeding the local disk limit | Raise the ephemeral-storage limit |
+| Image absent from the node with pull policy `Never` | Change the policy to `IfNotPresent` |
+| Service selector that nearly matches its pods | Correct the selector |
+| Pods refused at creation on the latest rollout (missing ServiceAccount, Pod Security, LimitRange) | Roll back |
+| Storage, quota, credentials, application bugs | None: explained and left to a person |
 
 Around that loop:
 
@@ -162,7 +167,7 @@ with `:profile cheap`, or via the `KBARK_PROFILE` env var.
 ## What kbark deliberately doesn't do
 
 - **No writes without approval.** The terminal UI is read-only. The
-  autofix layer can make six kinds of change and makes none of them
+  autofix layer can make nine kinds of change and makes none of them
   until a named person approves that specific change.
 - **No free-form remediation.** kbark never runs a shell command, execs
   into a container, or executes anything a language model wrote.
@@ -173,7 +178,7 @@ with `:profile cheap`, or via the `KBARK_PROFILE` env var.
 
 ## Security
 
-- kbark writes to a cluster only through six typed actions in
+- kbark writes to a cluster only through nine typed actions in
   `internal/remediate`, each after a named approval. `deploy/rbac.yaml`
   is the full permission set.
 - Every payload bound for an AI provider passes through `internal/redact`

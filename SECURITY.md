@@ -22,10 +22,11 @@ Out of scope: third-party forks, packages, or distributions; user-supplied confi
 
 `kbark serve` can change cluster state. What bounds that:
 
-- **Six typed actions, nothing else.** Raise a memory limit, roll a
-  workload back one revision, relax probe timing, delete an already-dead
-  pod, replace an unhealthy pod whose siblings are healthy, uncordon a
-  node. They live in `internal/remediate`. There is no shell, no exec, and
+- **Nine typed actions, nothing else.** Raise a memory limit, raise an
+  ephemeral-storage limit, roll a workload back one revision, relax probe
+  timing, change a pull policy from `Never` to `IfNotPresent`, correct a
+  Service selector, delete an already-dead pod, replace an unhealthy pod
+  whose siblings are healthy, uncordon a node. They live in `internal/remediate`. There is no shell, no exec, and
   no path from model output to an action: the AI provider is given no
   tools in this mode and its text is only displayed.
 - **An approval per change.** The only caller of `remediate.Apply` is

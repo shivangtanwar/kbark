@@ -202,6 +202,11 @@ func (p *Planner) planMemory(ctx context.Context, c *fleet.Cluster, inc *inciden
 		Risk:       "low",
 		Reversible: true,
 	}
+	follows := requestFollows(ctr, corev1.ResourceMemory)
+	defer func() {
+		// Runs after the cause-specific rationale below is chosen.
+		a.Rationale += follows
+	}()
 	confirmed := 0
 	if inc.Cause == detect.CauseInferred && p.ConfirmOOM {
 		confirmed = p.oomEvents(ctx, c, inc)
@@ -214,6 +219,17 @@ func (p *Planner) planMemory(ctx context.Context, c *fleet.Cluster, inc *inciden
 		a.Warnings = append(a.Warnings, "The container runtime did not label these kills as OOMKilled, so the out-of-memory cause is inferred, not confirmed. If memory is not the cause, verification will fail and the change can be rolled back.")
 	}
 	return p.finish(ctx, c, inc, a)
+}
+
+// requestFollows returns a sentence for the rationale when the
+// container's request equals its limit, because the fix then raises
+// both and the approver should not have to discover that in the diff.
+func requestFollows(ctr *corev1.Container, name corev1.ResourceName) string {
+	limit := ctr.Resources.Limits[name]
+	if req, ok := ctr.Resources.Requests[name]; ok && req.Cmp(limit) == 0 {
+		return " The request equals the limit and is raised with it, so the pod keeps its quality-of-service class; the scheduler will reserve the larger amount."
+	}
+	return ""
 }
 
 // --- set-ephemeral-storage-limit ---
@@ -256,6 +272,7 @@ func (p *Planner) planEphemeral(ctx context.Context, c *fleet.Cluster, inc *inci
 		Warnings:   []string{"If the container's disk use keeps growing (an unrotated log, a cache without a bound), a higher limit only delays the next eviction."},
 		Reversible: true,
 	}
+	a.Rationale += requestFollows(ctr, corev1.ResourceEphemeralStorage)
 	return p.finish(ctx, c, inc, a)
 }
 

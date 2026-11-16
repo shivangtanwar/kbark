@@ -164,7 +164,9 @@ func (i *Incident) Finding() detect.Finding {
 func (i *Incident) clone() *Incident {
 	c := *i
 	c.Evidence = append([]detect.Evidence(nil), i.Evidence...)
-	c.Pods = append([]string(nil), i.Pods...)
+	// Never nil: an incident without pods (a refused pod creation) must
+	// still serialize as a list.
+	c.Pods = append([]string{}, i.Pods...)
 	c.History = append([]HistoryEntry(nil), i.History...)
 	if i.Action != nil {
 		a := *i.Action
