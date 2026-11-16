@@ -6,12 +6,15 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -91,6 +94,8 @@ type Server struct {
 	// allows that only on a loopback address.
 	Auth   *auth.Manager
 	Notify *notify.Webhook
+	// gz caches compressed console assets by file name.
+	gz sync.Map
 	// AllowedHosts, when non-empty, is the set of Host header values
 	// the API answers to. It defeats DNS-rebinding attacks.
 	AllowedHosts []string
@@ -165,6 +170,13 @@ func (s *Server) static() http.Handler {
 			// Vite fingerprints these file names, so they never change.
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
+		if body, ok := s.gzipped(dist, name); ok && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Type", mime.TypeByExtension(path.Ext(name)))
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Vary", "Accept-Encoding")
+			_, _ = w.Write(body)
+			return
+		}
 		if name == "index.html" {
 			body, err := fs.ReadFile(dist, "index.html")
 			if err != nil {
@@ -177,6 +189,32 @@ func (s *Server) static() http.Handler {
 		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+// gzipped returns the compressed form of a script, stylesheet or SVG
+// from the built console, compressing each file once. The bundle is
+// several times smaller compressed, which is most of the first load.
+func (s *Server) gzipped(dist fs.FS, name string) ([]byte, bool) {
+	switch path.Ext(name) {
+	case ".js", ".css", ".svg":
+	default:
+		return nil, false
+	}
+	if v, ok := s.gz.Load(name); ok {
+		return v.([]byte), true
+	}
+	raw, err := fs.ReadFile(dist, name)
+	if err != nil {
+		return nil, false
+	}
+	var buf bytes.Buffer
+	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	_, _ = zw.Write(raw)
+	if err := zw.Close(); err != nil {
+		return nil, false
+	}
+	s.gz.Store(name, buf.Bytes())
+	return buf.Bytes(), true
 }
 
 // guard rejects requests that could only come from another web page:

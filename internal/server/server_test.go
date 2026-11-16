@@ -3,9 +3,12 @@
 package server
 
 import (
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -202,5 +205,36 @@ func TestLocalHosts(t *testing.T) {
 	}
 	if got := LocalHosts("0.0.0.0:9000"); got != nil {
 		t.Errorf("non-loopback must not restrict Host: %v", got)
+	}
+}
+
+func TestConsoleScriptIsCompressedOnRequest(t *testing.T) {
+	h := newServer(t, false).Handler()
+	m := regexp.MustCompile(`/assets/index-[^"]+\.js`).FindString(do(h, "GET", "/", host, nil, "").Body.String())
+	if m == "" {
+		t.Skip("the console has not been built")
+	}
+	plain := do(h, "GET", m, host, nil, "")
+	if plain.Code != http.StatusOK || plain.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("without Accept-Encoding: %d, encoding %q", plain.Code, plain.Header().Get("Content-Encoding"))
+	}
+	req := httptest.NewRequest("GET", m, nil)
+	req.Host = host
+	req.Header.Set("Accept-Encoding", "gzip, br")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Header().Get("Content-Encoding") != "gzip" || !strings.Contains(rec.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("want a gzip-encoded script, got %q %q", rec.Header().Get("Content-Encoding"), rec.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(rec.Header().Get("Cache-Control"), "immutable") {
+		t.Error("fingerprinted assets must stay cacheable when compressed")
+	}
+	zr, err := gzip.NewReader(rec.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(zr)
+	if len(body) != plain.Body.Len() || rec.Body.Len() >= plain.Body.Len() {
+		t.Errorf("decompressed %d bytes, want %d", len(body), plain.Body.Len())
 	}
 }
