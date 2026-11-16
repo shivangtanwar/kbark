@@ -1,0 +1,78 @@
+# Credentials for the console's demo lab (`kbark serve --demo-kubeconfig`).
+#
+# The lab injects sample failures so a demonstration needs no terminal.
+# It is NOT part of the autofix write path and must not share its
+# identity: kbark's own service account (rbac.yaml) cannot create
+# anything, and that stays true. This second account can create and
+# delete demo workloads in one namespace, kbark-demo, and cordon nodes
+# for the "cordon" scenario. Do not apply this file to a cluster that
+# runs real workloads.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kbark-demo
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kbark-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kbark-demo-lab
+  namespace: kbark-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kbark-demo-lab
+  namespace: kbark-demo
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]
+    resources: [services, configmaps, pods]
+    verbs: [get, list, create, patch, delete]
+  # The "evicted" scenario writes the status a kubelet writes on eviction.
+  - apiGroups: [""]
+    resources: [pods/status]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kbark-demo-lab
+  namespace: kbark-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kbark-demo-lab
+subjects:
+  - kind: ServiceAccount
+    name: kbark-demo-lab
+    namespace: kbark-system
+---
+# The "cordon" scenario and the reset need to cordon and uncordon nodes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kbark-demo-lab
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kbark-demo-lab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kbark-demo-lab
+subjects:
+  - kind: ServiceAccount
+    name: kbark-demo-lab
+    namespace: kbark-system

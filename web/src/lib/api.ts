@@ -40,7 +40,7 @@ export interface PodRow {
   restarts: number; created: string; node: string; owner: Ref;
   health: 'healthy' | 'failing' | 'pending' | 'done'; families?: string[];
 }
-export interface Info { version: string; ai: string; auditPath: string; statePath: string; publicURL: string }
+export interface Info { version: string; ai: string; auditPath: string; statePath: string; publicURL: string; demo?: boolean }
 export interface State { info: Info; now: string; clusters: ClusterSummary[]; pods: PodRow[]; incidents: Incident[] }
 
 export interface AuditEntry {
@@ -53,6 +53,10 @@ export interface PolicyRule { name?: string; clusters?: string[]; namespaces?: s
 export interface Policy { defaults: { memory_ceiling: string; max_attempts: number; attempt_window: string }; rules: PolicyRule[] | null; source: string }
 export interface NotifyStatus { enabled: boolean; host?: string; events?: string[]; sent: number; failed: number; dropped: number; lastError?: string }
 export interface Settings { info: Info; policy: Policy; notify: NotifyStatus; authEnabled: boolean; users?: User[]; clusters: string[] }
+
+export interface Scenario { id: string; title: string; breaks: string; expect: string; risk: '' | 'low' | 'medium'; note?: string; workload: string; group: string }
+export interface LabStatus { cluster: string; running: { id: string; step: string }[]; last?: string; lastError?: string; finishedAt?: string; actor?: string }
+export interface Demo { namespace: string; scenarios: Scenario[]; clusters: LabStatus[]; canRun: boolean }
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -79,6 +83,8 @@ export const api = {
   audit: () => request<{ path: string; entries: AuditEntry[] }>('/api/audit'),
   history: (window: string) => request<{ window: string; samples: Sample[] }>(`/api/history?window=${window}`),
   settings: () => request<Settings>('/api/settings'),
+  demo: () => request<Demo>('/api/demo'),
+  demoRun: (cluster: string, scenario: string) => post<Demo>(`/api/demo/${encodeURIComponent(cluster)}/${encodeURIComponent(scenario)}`, {}),
   act: (id: string, verb: 'approve' | 'reject' | 'rollback' | 'replan', data: { operator?: string; reason?: string }) =>
     post<Incident>(`/api/incidents/${encodeURIComponent(id)}/${verb}`, data),
 };

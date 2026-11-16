@@ -5,6 +5,7 @@ import { useLive } from './lib/live';
 import { workloadName } from './lib/vocab';
 import { Audit } from './pages/Audit';
 import { Clusters } from './pages/Clusters';
+import { DemoLab } from './pages/DemoLab';
 import { IncidentDetail, useIncident } from './pages/IncidentDetail';
 import { Incidents } from './pages/Incidents';
 import { Login } from './pages/Login';
@@ -32,6 +33,7 @@ export function App() {
         <Route element={<Shell title="Pods" />}><Route path="pods" element={<Pods />} /></Route>
         <Route element={<Shell title="Audit log" />}><Route path="audit" element={<Audit />} /></Route>
         <Route element={<Shell title="Settings" />}><Route path="settings" element={<Settings />} /></Route>
+        <Route element={<Shell title="Demo lab" />}><Route path="demo" element={<DemoLab />} /></Route>
         <Route element={<Shell title="Not found" />}><Route path="*" element={<Card><Empty title="This page does not exist"><Link to="/" className="text-accent">Go to the overview</Link></Empty></Card>} /></Route>
       </Routes>
       <Toasts />

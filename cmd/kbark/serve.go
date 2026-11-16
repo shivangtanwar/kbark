@@ -26,6 +26,7 @@ import (
 	"github.com/shivangtanwar/kbark/internal/config"
 	"github.com/shivangtanwar/kbark/internal/fleet"
 	"github.com/shivangtanwar/kbark/internal/incident"
+	"github.com/shivangtanwar/kbark/internal/lab"
 	"github.com/shivangtanwar/kbark/internal/notify"
 	"github.com/shivangtanwar/kbark/internal/policy"
 	"github.com/shivangtanwar/kbark/internal/remediate"
@@ -34,25 +35,27 @@ import (
 )
 
 type serveOptions struct {
-	contexts      []string
-	addr          string
-	auditLog      string
-	memoryCeiling string
-	verifyTimeout time.Duration
-	verifyHold    time.Duration
-	protected     []string
-	noAI          bool
-	inCluster     bool
-	clusterName   string
-	policyFile    string
-	stateFile     string
-	authFile      string
-	publicURL     string
-	notifyWebhook string
-	notifyEvents  []string
-	confirmOOM    bool
-	insecure      bool
-	trustProxy    bool
+	demo           bool
+	demoKubeconfig string
+	contexts       []string
+	addr           string
+	auditLog       string
+	memoryCeiling  string
+	verifyTimeout  time.Duration
+	verifyHold     time.Duration
+	protected      []string
+	noAI           bool
+	inCluster      bool
+	clusterName    string
+	policyFile     string
+	stateFile      string
+	authFile       string
+	publicURL      string
+	notifyWebhook  string
+	notifyEvents   []string
+	confirmOOM     bool
+	insecure       bool
+	trustProxy     bool
 }
 
 var serveOpts serveOptions
@@ -93,6 +96,8 @@ func init() {
 	f.StringSliceVar(&serveOpts.notifyEvents, "notify-events", notify.DefaultEvents, "Events that trigger a notification")
 	f.BoolVar(&serveOpts.confirmOOM, "confirm-oom", false, "Confirm inferred out-of-memory kills from the node's kubelet metrics (needs get on nodes/proxy)")
 	f.BoolVar(&serveOpts.trustProxy, "trust-proxy", false, "Take client addresses from X-Real-IP / X-Forwarded-For; set only when all traffic arrives through your reverse proxy")
+	f.BoolVar(&serveOpts.demo, "demo", false, "Enable the demo lab: the console can inject sample failures into the kbark-demo namespace, using the same credentials kbark watches with")
+	f.StringVar(&serveOpts.demoKubeconfig, "demo-kubeconfig", "", "Enable the demo lab with separate credentials: a kubeconfig holding one context per watched cluster, with the same names (see deploy/demo-rbac.yaml)")
 	f.BoolVar(&serveOpts.insecure, "insecure-no-auth", false, "Allow a non-loopback --addr without --auth-file. Anyone who can reach the port can approve changes")
 	rootCmd.AddCommand(serveCmd)
 }
@@ -173,6 +178,19 @@ func runServe(_ *cobra.Command, _ []string) error {
 	}
 
 	hub := server.NewHub()
+	demoLab, err := buildLab(o, clusters)
+	if err != nil {
+		return err
+	}
+	if demoLab != nil {
+		demoLab.OnChange = hub.Notify
+		demoLab.Log = func(cluster, scenario, actor, note string) {
+			audit.Append(incident.Entry{
+				Time: time.Now(), Cluster: cluster, Namespace: lab.Namespace, Workload: "demo/" + scenario,
+				Event: "demo", Actor: actor, Note: "demo lab: " + scenario + " " + note,
+			})
+		}
+	}
 	store := incident.NewStore(audit, hub.Notify)
 	if hook != nil {
 		store.OnEvent(hook.Notify)
@@ -197,8 +215,8 @@ func runServe(_ *cobra.Command, _ []string) error {
 	go func() { engine.Run(ctx); close(done) }()
 
 	srv := &server.Server{
-		Engine: engine, Store: store, Audit: audit, Hub: hub, Auth: users, Notify: hook,
-		Info:          server.Info{Version: version.Version, AI: explainer.Name(), AuditPath: auditPath, StatePath: statePath, PublicURL: o.publicURL},
+		Engine: engine, Store: store, Audit: audit, Hub: hub, Auth: users, Notify: hook, Lab: demoLab,
+		Info:          server.Info{Version: version.Version, AI: explainer.Name(), AuditPath: auditPath, StatePath: statePath, PublicURL: o.publicURL, Demo: demoLab != nil},
 		AllowedHosts:  allowedHosts,
 		SecureCookies: secureCookies,
 		TrustProxy:    o.trustProxy,
@@ -235,6 +253,9 @@ func runServe(_ *cobra.Command, _ []string) error {
 	if hook != nil {
 		fmt.Printf("  notify:    webhook at %s\n", hook.Status().Host)
 	}
+	if demoLab != nil {
+		fmt.Printf("  demo lab:  ON. Administrators can inject sample failures into namespace %s from the console.\n", lab.Namespace)
+	}
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.Serve(ln) }()
@@ -254,6 +275,34 @@ func runServe(_ *cobra.Command, _ []string) error {
 	case <-time.After(5 * time.Second):
 	}
 	return nil
+}
+
+// buildLab returns the demo lab when a demo flag is set, or nil.
+func buildLab(o serveOptions, clusters []*fleet.Cluster) (*lab.Lab, error) {
+	if !o.demo && o.demoKubeconfig == "" {
+		return nil, nil
+	}
+	kubeconfig := o.demoKubeconfig
+	if kubeconfig == "" && kubeFlags.KubeConfig != nil {
+		kubeconfig = *kubeFlags.KubeConfig
+	}
+	cfgs := map[string]*rest.Config{}
+	var order []string
+	for _, c := range clusters {
+		var cfg *rest.Config
+		var err error
+		if o.inCluster && o.demoKubeconfig == "" {
+			cfg, err = rest.InClusterConfig()
+		} else {
+			cfg, err = fleet.RESTConfigForContext(kubeconfig, c.Name)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("demo lab: %w", err)
+		}
+		cfgs[c.Name] = cfg
+		order = append(order, c.Name)
+	}
+	return lab.New(order, cfgs)
 }
 
 func orNone(s string) string {

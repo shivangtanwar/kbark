@@ -90,14 +90,14 @@ cmd_break() {
       k -n "$NS" rollout status deploy/gateway --timeout=90s
       k apply -f "$FIX/gateway-v2.yaml" ;;
     stuck-pod)
-      # Corrupts the local state of one "sessions" pod. kbark replaces a
+      # Marks the state of one "sessions" pod corrupt. kbark replaces a
       # single pod only when its siblings have been ready for five
       # minutes, so run this at least that long after "up" or "reset".
       local pod
       pod="$(k -n "$NS" get pods -l app=sessions --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
       [ -n "$pod" ] || { echo "no running sessions pod; run 'up' or 'reset' first" >&2; exit 1; }
-      k -n "$NS" exec "$pod" -- touch /state/corrupt
-      echo "corrupted the local state of $pod" ;;
+      k -n "$NS" annotate pod "$pod" kbark.dev/demo-state=corrupt --overwrite >/dev/null
+      echo "marked the local state of $pod corrupt (the pod notices within about a minute)" ;;
     sts-crash)
       k apply -f "$FIX/ledger-v1.yaml"
       k -n "$NS" rollout status statefulset/ledger --timeout=90s

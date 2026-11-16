@@ -21,6 +21,9 @@ services:
       - --state=/kbark/data/state.json
       - --audit-log=/kbark/data/audit.jsonl
       - --profile=server
+      # The demo lab: administrators can inject sample failures from the
+      # console. Remove this line (and the mount below) to turn it off.
+      - --demo-kubeconfig=/kbark/demo-kubeconfig
     environment:
       KUBECONFIG: /kbark/kubeconfig
       XDG_CONFIG_HOME: /kbark/config
@@ -32,6 +35,7 @@ services:
       - ./bin:/kbark/bin:ro
       - ./config:/kbark/config:ro
       - ./kubeconfig:/kbark/kubeconfig:ro
+      - ./demo-kubeconfig:/kbark/demo-kubeconfig:ro
       - ./users.yaml:/kbark/users.yaml:ro
       - ./policy.yaml:/kbark/policy.yaml:ro
       - ./data:/kbark/data

@@ -33,7 +33,9 @@ fetch "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl" "$BIN
 chmod 755 "$BIN/kbark"
 
 KCFG="$ROOT/kubeconfig"
+DEMO_KCFG="$ROOT/demo-kubeconfig"
 : > "$KCFG.new"
+: > "$DEMO_KCFG.new"
 for c in "${CLUSTERS[@]}"; do
   if ! kind get clusters 2>/dev/null | grep -qx "$c"; then
     kind create cluster --name "$c" --image "$NODE_IMAGE" --wait 180s
@@ -51,11 +53,21 @@ for c in "${CLUSTERS[@]}"; do
   kubectl --kubeconfig "$KCFG.new" config set-cluster "$c" --server "https://$c-control-plane:6443" --certificate-authority "$ca" --embed-certs=true >/dev/null
   kubectl --kubeconfig "$KCFG.new" config set-credentials "kbark@$c" --token "$token" >/dev/null
   kubectl --kubeconfig "$KCFG.new" config set-context "$c" --cluster "$c" --user "kbark@$c" >/dev/null
+
+  # A second, separate identity for the console's demo lab: it may
+  # create demo workloads in kbark-demo and nothing else.
+  kubectl --context "$ctx" apply -f "$ROOT/deploy/demo-rbac.yaml" >/dev/null
+  demo_token="$(kubectl --context "$ctx" -n kbark-system create token kbark-demo-lab --duration=8760h)"
+  kubectl --kubeconfig "$DEMO_KCFG.new" config set-cluster "$c" --server "https://$c-control-plane:6443" --certificate-authority "$ca" --embed-certs=true >/dev/null
+  kubectl --kubeconfig "$DEMO_KCFG.new" config set-credentials "demo-lab@$c" --token "$demo_token" >/dev/null
+  kubectl --kubeconfig "$DEMO_KCFG.new" config set-context "$c" --cluster "$c" --user "demo-lab@$c" >/dev/null
   rm -f "$ca"
 done
 kubectl --kubeconfig "$KCFG.new" config use-context "${CLUSTERS[0]}" >/dev/null
 mv "$KCFG.new" "$KCFG"
-chmod 600 "$KCFG"
+kubectl --kubeconfig "$DEMO_KCFG.new" config use-context "${CLUSTERS[0]}" >/dev/null
+mv "$DEMO_KCFG.new" "$DEMO_KCFG"
+chmod 600 "$KCFG" "$DEMO_KCFG"
 
 if [ ! -f users.yaml ]; then
   admin_pw="$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | cut -c1-20)"

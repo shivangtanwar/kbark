@@ -30,6 +30,7 @@ export const EVENTS: Record<string, { label: string; tone: Tone }> = {
   'rejected':    { label: 'Rejected',           tone: 'idle' },
   'rolled-back': { label: 'Rolled back',        tone: 'idle' },
   'resolved':    { label: 'Cleared on its own', tone: 'ok' },
+  'demo':        { label: 'Demo step',          tone: 'idle' },
 };
 
 export const FAMILIES: Record<string, string> = {

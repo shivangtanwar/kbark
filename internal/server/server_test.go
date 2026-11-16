@@ -13,10 +13,12 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
+	"k8s.io/client-go/rest"
 
 	"github.com/shivangtanwar/kbark/internal/auth"
 	"github.com/shivangtanwar/kbark/internal/autofix"
 	"github.com/shivangtanwar/kbark/internal/incident"
+	"github.com/shivangtanwar/kbark/internal/lab"
 )
 
 const host = "127.0.0.1:8765"
@@ -236,5 +238,45 @@ func TestConsoleScriptIsCompressedOnRequest(t *testing.T) {
 	body, _ := io.ReadAll(zr)
 	if len(body) != plain.Body.Len() || rec.Body.Len() >= plain.Body.Len() {
 		t.Errorf("decompressed %d bytes, want %d", len(body), plain.Body.Len())
+	}
+}
+
+func TestDemoLabIsOffUnlessConfigured(t *testing.T) {
+	h := newServer(t, false).Handler()
+	if rec := do(h, "GET", "/api/demo", host, nil, ""); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /api/demo without a lab = %d, want 404", rec.Code)
+	}
+	if rec := do(h, "POST", "/api/demo/a/oom", host, jsonHeader, "{}"); rec.Code != http.StatusNotFound {
+		t.Errorf("POST without a lab = %d, want 404", rec.Code)
+	}
+}
+
+func TestOnlyAdminsInjectDemoFailures(t *testing.T) {
+	s := newServer(t, true)
+	// The address is never dialled: every request below is refused first.
+	l, err := lab.New([]string{"a"}, map[string]*rest.Config{"a": {Host: "http://127.0.0.1:1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Lab = l
+	h := s.Handler()
+	for _, user := range []string{"vik", "asha"} {
+		c := signIn(t, h, user)
+		if rec := do(h, "POST", "/api/demo/a/oom", host, jsonHeader, "{}", c); rec.Code != http.StatusForbidden {
+			t.Errorf("%s injecting a failure = %d, want 403", user, rec.Code)
+		}
+		if rec := do(h, "GET", "/api/demo", host, nil, "", c); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"canRun":false`) {
+			t.Errorf("%s reading the lab = %d %s", user, rec.Code, rec.Body)
+		}
+	}
+	admin := signIn(t, h, "root")
+	if rec := do(h, "POST", "/api/demo/a/no-such-scenario", host, jsonHeader, "{}", admin); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown scenario = %d, want 404", rec.Code)
+	}
+	if rec := do(h, "POST", "/api/demo/other/oom", host, jsonHeader, "{}", admin); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown cluster = %d, want 404", rec.Code)
+	}
+	if rec := do(h, "GET", "/api/demo", host, nil, "", admin); !strings.Contains(rec.Body.String(), `"canRun":true`) || !strings.Contains(rec.Body.String(), `"id":"oom"`) {
+		t.Errorf("admin reading the lab: %s", rec.Body)
 	}
 }

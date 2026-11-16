@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import { AlertTriangle, Boxes, FileText, LayoutGrid, LogOut, Menu, Moon, Server, Settings as Cog, Sun, X } from 'lucide-react';
+import { AlertTriangle, Boxes, FlaskConical, FileText, LayoutGrid, LogOut, Menu, Moon, Server, Settings as Cog, Sun, X } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useLive } from '../lib/live';
@@ -57,6 +57,7 @@ export function Shell({ title, crumb }: { title: string; crumb?: ReactNode }) {
           <Item to="/pods" icon={<Boxes />}>Pods</Item>
           <Item to="/audit" icon={<FileText />}>Audit log</Item>
           <Item to="/settings" icon={<Cog />}>Settings</Item>
+          {state?.info.demo && <Item to="/demo" icon={<FlaskConical />}>Demo lab</Item>}
         </nav>
 
         <div className="mt-auto flex flex-col gap-3 border-t border-line px-1.5 pt-3">

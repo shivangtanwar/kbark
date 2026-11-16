@@ -27,7 +27,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/stage/bin/kbark
 mkdir -p /tmp/stage/deploy /tmp/stage/demo
 cp deploy/server/compose.yaml deploy/server/policy.yaml /tmp/stage/
 cp -r deploy/server/config /tmp/stage/
-cp deploy/rbac.yaml deploy/server/{setup.sh,install-nginx.sh,nginx.conf,demo} /tmp/stage/deploy/
+cp deploy/rbac.yaml deploy/demo-rbac.yaml deploy/server/{setup.sh,install-nginx.sh,nginx.conf,demo} /tmp/stage/deploy/
 cp -r demo/demo.sh demo/fixtures /tmp/stage/demo/
 rsync -az /tmp/stage/ SERVER:kbark/
 ```
@@ -71,3 +71,10 @@ Without a key kbark runs normally and the Explanation card says so.
 - kbark holds no cluster-admin credentials. `demo/demo.sh` uses the
   admin kubeconfig Kind wrote to `~/.kube/config`, which only the server
   account can read.
+- The **Demo lab** page of the console injects the same scenarios with a
+  click (admin role only). It uses a second identity, `kbark-demo-lab`
+  (`deploy/demo-rbac.yaml`, kept in `~/kbark/demo-kubeconfig`), which can
+  create and delete workloads in the `kbark-demo` namespace and cordon
+  nodes, and nothing else. kbark's fixing identity is unchanged and
+  still cannot create anything. To turn the lab off, remove the
+  `--demo-kubeconfig` line from `compose.yaml` and restart.

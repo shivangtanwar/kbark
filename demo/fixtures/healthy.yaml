@@ -34,8 +34,10 @@ spec:
   selector: {app: web}
   ports: [{port: 80, targetPort: 8080}]
 ---
-# Three replicas that keep session state on local disk. The "stuck-pod"
-# scenario corrupts that state in one pod only.
+# Three replicas. The "stuck-pod" scenario marks one pod's state as
+# corrupt through a pod annotation, which the container sees through a
+# downward-API file. Only that pod is affected, and a replacement pod
+# starts clean.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,14 +54,17 @@ spec:
     spec:
       terminationGracePeriodSeconds: 2
       volumes:
-        - name: state
-          emptyDir: {}
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: annotations
+                fieldRef: {fieldPath: metadata.annotations}
       containers:
         - name: app
           image: busybox:1.36
-          command: ["sh", "-c", "echo opening /state/sessions.db; while [ ! -f /state/corrupt ]; do sleep 2; done; echo \"FATAL: /state/sessions.db: checksum mismatch in page 12\"; exit 1"]
+          command: ["sh", "-c", "echo opening /state/sessions.db; while ! grep -q 'kbark.dev/demo-state=\"corrupt\"' /podinfo/annotations 2>/dev/null; do sleep 2; done; echo \"FATAL: /state/sessions.db: checksum mismatch in page 12\"; exit 1"]
           volumeMounts:
-            - {name: state, mountPath: /state}
+            - {name: podinfo, mountPath: /podinfo}
           resources:
             requests: {cpu: 10m, memory: 16Mi}
             limits: {memory: 64Mi}

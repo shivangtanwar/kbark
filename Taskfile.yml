@@ -46,7 +46,7 @@ tasks:
   serve:
     desc: Run the autofix dashboard against the two demo Kind clusters
     cmds:
-      - go run -ldflags "{{.LDFLAGS}}" {{.PKG}} serve --contexts kind-kbark-dev,kind-kbark-staging {{.CLI_ARGS}}
+      - go run -ldflags "{{.LDFLAGS}}" {{.PKG}} serve --contexts kind-kbark-dev,kind-kbark-staging --demo {{.CLI_ARGS}}
 
   demo-up:
     desc: Create the demo Kind clusters and the healthy baseline

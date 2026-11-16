@@ -250,6 +250,12 @@ real cluster, bind the same ClusterRole to the kubeconfig user.
 
 ## 6. Demonstration
 
+The quickest way to run any scenario is the console's **Demo lab** page
+(start kbark with `--demo`; on the server it is already on for the admin
+account): choose the cluster, click "Inject failure", and the card links to
+the incident once kbark opens it. "Reset namespace" restores the baseline.
+The commands below do the same from a terminal.
+
 Before the session: `demo/demo.sh up`, then `demo/demo.sh reset` on both
 contexts, start `kbark serve`, open the console and sign in (or, in local
 open mode, type your name under "Signing as"). Pre-inject the scenarios

@@ -27,6 +27,7 @@ import (
 	"github.com/shivangtanwar/kbark/internal/autofix"
 	"github.com/shivangtanwar/kbark/internal/fleet"
 	"github.com/shivangtanwar/kbark/internal/incident"
+	"github.com/shivangtanwar/kbark/internal/lab"
 	"github.com/shivangtanwar/kbark/internal/notify"
 	"github.com/shivangtanwar/kbark/internal/policy"
 )
@@ -80,6 +81,8 @@ type Info struct {
 	AuditPath string `json:"auditPath"`
 	StatePath string `json:"statePath"`
 	PublicURL string `json:"publicURL"`
+	// Demo reports that the demo lab is enabled on this server.
+	Demo bool `json:"demo"`
 }
 
 // Server is the HTTP front end.
@@ -94,6 +97,9 @@ type Server struct {
 	// allows that only on a loopback address.
 	Auth   *auth.Manager
 	Notify *notify.Webhook
+	// Lab, when set, lets an administrator inject demo failures from
+	// the console. It has its own credentials; see package lab.
+	Lab *lab.Lab
 	// gz caches compressed console assets by file name.
 	gz sync.Map
 	// AllowedHosts, when non-empty, is the set of Host header values
@@ -141,6 +147,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stream", s.stream)
 	mux.HandleFunc("GET /api/incidents/{id}", s.incident)
 	mux.HandleFunc("POST /api/incidents/{id}/{verb}", s.act)
+	mux.HandleFunc("GET /api/demo", s.demo)
+	mux.HandleFunc("POST /api/demo/{cluster}/{scenario}", s.demoRun)
 	mux.Handle("GET /", s.static())
 	return s.guard(s.authenticate(mux))
 }
@@ -470,6 +478,56 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, inc)
+}
+
+// Demo is the demo lab as the console sees it.
+type Demo struct {
+	Namespace string         `json:"namespace"`
+	Scenarios []lab.Scenario `json:"scenarios"`
+	Clusters  []lab.Status   `json:"clusters"`
+	// CanRun reports whether this caller may inject failures.
+	CanRun bool `json:"canRun"`
+}
+
+// mayRunDemo: with sign-in, only administrators break things on purpose.
+func (s *Server) mayRunDemo(r *http.Request) (actor string, ok bool) {
+	if s.Auth == nil {
+		return "demo", true
+	}
+	u, signedIn := userFrom(r)
+	return u.Name, signedIn && u.Role == auth.RoleAdmin
+}
+
+func (s *Server) demo(w http.ResponseWriter, r *http.Request) {
+	if s.Lab == nil {
+		writeError(w, http.StatusNotFound, "the demo lab is not enabled on this server")
+		return
+	}
+	_, can := s.mayRunDemo(r)
+	writeJSON(w, http.StatusOK, Demo{Namespace: lab.Namespace, Scenarios: lab.Scenarios(), Clusters: s.Lab.Statuses(), CanRun: can})
+}
+
+func (s *Server) demoRun(w http.ResponseWriter, r *http.Request) {
+	if s.Lab == nil {
+		writeError(w, http.StatusNotFound, "the demo lab is not enabled on this server")
+		return
+	}
+	actor, ok := s.mayRunDemo(r)
+	if !ok {
+		writeError(w, http.StatusForbidden, "injecting demo failures needs the admin role")
+		return
+	}
+	err := s.Lab.Start(r.PathValue("cluster"), r.PathValue("scenario"), actor)
+	switch {
+	case errors.Is(err, lab.ErrUnknown):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, lab.ErrBusy):
+		writeError(w, http.StatusConflict, err.Error())
+	case err != nil:
+		writeError(w, http.StatusBadGateway, err.Error())
+	default:
+		writeJSON(w, http.StatusAccepted, Demo{Namespace: lab.Namespace, Scenarios: lab.Scenarios(), Clusters: s.Lab.Statuses(), CanRun: true})
+	}
 }
 
 func statusFor(err error) int {

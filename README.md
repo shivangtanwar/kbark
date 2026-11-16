@@ -61,6 +61,10 @@ Around that loop:
   be proposed, a memory ceiling, and detect-only areas. No policy can
   remove the approval step.
 - **History.** Incidents and health trends are saved and survive restarts.
+- **Demo lab.** `--demo` adds a console page that injects sample failures
+  into the `kbark-demo` namespace with one click, so a demonstration needs
+  no terminal. Off by default; admin role only; `--demo-kubeconfig` gives
+  it credentials separate from the ones kbark fixes with.
 - **Notifications.** `--notify-webhook` posts to a Slack-compatible
   webhook when a fix is waiting, fails, or is verified.
 
