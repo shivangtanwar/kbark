@@ -307,13 +307,19 @@ Verified by running:
   rollback on the staging cluster with an explanation; the viewer account is
   read-only; state survived a container restart.
 
+- The public address, https://demo.kbark.dev: valid certificate, HTTP
+  redirects to HTTPS, the API answers 401 without a session, the live stream
+  passes through nginx, and a rollback was approved in a browser over the
+  public address and verified 31 seconds after detection.
+- AI explanations against a real provider (an OpenAI-compatible endpoint,
+  model `gpt-6.1-sol`) on the server: explanations quote the evidence and the
+  container log. One explanation misstated the memory request; the model is
+  now given the exact diff, and that correction has not been re-observed.
+- Automatic re-planning: an incident left as "no automatic fix" because its
+  Deployment was briefly missing returned to a proposal by itself.
+
 Not verified:
 
-- The public address. nginx and the certificate need root on the server;
-  `install-nginx.sh` was written but not run by the build.
-- AI explanations against a real provider. No working key was available. The
-  path is covered by tests with a fake provider, and a provider error does
-  not affect detection or fixes.
 - `--confirm-oom`: the metric parser is tested, but the Kind runtime never
   reports out-of-memory events, so a confirmation has not been observed.
 - The `restart-pod` action and StatefulSet rollback on a live cluster (both
