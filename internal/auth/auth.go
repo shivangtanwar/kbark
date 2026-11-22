@@ -51,7 +51,8 @@ func (u User) CanApprove() bool { return u.Role == RoleApprover || u.Role == Rol
 func (u User) Public() User { u.PasswordHash = ""; return u }
 
 type usersFile struct {
-	Users []User `json:"users"`
+	Users []User      `json:"users"`
+	OIDC  *OIDCConfig `json:"oidc,omitempty"`
 }
 
 // ErrInvalid is returned for a wrong username or password. The two are
@@ -84,9 +85,12 @@ type Manager struct {
 	// sso, when set, resolves accounts that are not in the users file
 	// (single sign-on). See SetSSOResolver.
 	sso func(username string) (User, bool)
+	// oidc is the single-sign-on block from the users file, or nil.
+	oidc *OIDCConfig
 }
 
-// Load reads and validates a users file.
+// Load reads and validates a users file. The optional oidc block is
+// validated and exposed through Manager.OIDC.
 func Load(path string) (*Manager, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -96,7 +100,24 @@ func Load(path string) (*Manager, error) {
 	if err := yaml.UnmarshalStrict(raw, &f); err != nil {
 		return nil, fmt.Errorf("users file %s: %w", path, err)
 	}
-	return New(f.Users)
+	m, err := New(f.Users)
+	if err != nil {
+		return nil, err
+	}
+	m.oidc = f.OIDC
+	if f.OIDC != nil {
+		if err := f.OIDC.Validate(); err != nil {
+			return nil, err
+		}
+		m.SetSSOResolver(f.OIDC.Resolver())
+	}
+	return m, nil
+}
+
+// OIDC returns the single-sign-on configuration, or nil when the users
+// file has no oidc block.
+func (m *Manager) OIDC() *OIDCConfig {
+	return m.oidc
 }
 
 // New builds a manager from a list of users.

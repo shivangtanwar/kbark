@@ -48,10 +48,25 @@ Out of scope: third-party forks, packages, or distributions; user-supplied confi
 
 - **Sign-in.** With `--auth-file`, every API call needs a session and
   writes need the approver or admin role. Passwords are stored as bcrypt
-  hashes. Sessions are random 256-bit tokens held in server memory, sent
+  hashes. Sessions are random 256-bit tokens, sent
   as an `HttpOnly`, `SameSite=Strict` cookie (also `Secure` when
   `--public-url` is https), valid for 12 hours. The name recorded in the
   audit log is the account's, not something the browser supplies.
+  Sessions can survive a restart (`--session-file`, default next to the
+  state file); only a SHA-256 hash of each token is written to disk.
+- **Single sign-on.** The users file's optional `oidc` block adds
+  OpenID Connect sign-in with PKCE (go-oidc verifies the ID token's
+  signature, issuer, audience, expiry and nonce, and `email_verified`
+  must be true when the provider sends the claim). Handshake state is
+  kept server-side, is single-use, and expires after 5 minutes; a
+  successful sign-in becomes an ordinary kbark session, so roles and the
+  audit trail work unchanged. Failures redirect to the login page with
+  one of kbark's own short codes — provider error text is never
+  reflected into the page.
+- **Metrics.** `--metrics-addr` serves Prometheus text on its own
+  loopback listener, separate from the console: scrapers do not sign
+  in, and the console gains no unauthenticated route. A non-loopback
+  address is refused without `--metrics-insecure-public`.
 - **Lockout.** Five failed sign-ins from one client for one username lock
   that pair out for a minute. Behind a reverse proxy pass `--trust-proxy`
   so the client address comes from the proxy's headers; do not pass it
@@ -64,9 +79,11 @@ Out of scope: third-party forks, packages, or distributions; user-supplied confi
 
 Known limits:
 
-- Accounts live in a file; there is no single sign-on, no password reset
-  flow and no second factor.
-- Sessions are lost when kbark restarts.
+- Password accounts live in a file; there is no password reset flow and
+  no second factor. Single sign-on, when configured, has no second
+  factor of its own either — the provider's is the only one.
+- Metrics on a loopback listener are unauthenticated by design; whatever
+  can read them learns cluster names and incident counts.
 - **Local mode uses your kubeconfig credentials**, which are usually broader
   than `deploy/rbac.yaml`. The server deployment in `deploy/server/` uses
   a service-account token bound to that role instead.

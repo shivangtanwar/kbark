@@ -56,11 +56,16 @@ Around that loop:
 
 - **Sign-in and roles.** `--auth-file` enables accounts (viewer, approver,
   admin); approvals are recorded against the signed-in account. Without
-  it the console listens on localhost only.
+  it the console listens on localhost only. An optional `oidc` block in
+  the users file adds single sign-on (OpenID Connect with PKCE; role by
+  email or domain), and `--session-file` (default next to the state file)
+  keeps sessions across a restart.
 - **Policy.** `--policy` sets, per cluster and namespace, which fixes may
   be proposed, a memory ceiling, and detect-only areas. No policy can
   remove the approval step.
 - **History.** Incidents and health trends are saved and survive restarts.
+- **Metrics.** `--metrics-addr` (e.g. `127.0.0.1:9108`) serves Prometheus
+  metrics on a separate loopback listener.
 - **Demo lab.** `--demo` adds a console page that injects sample failures
   into the `kbark-demo` namespace with one click, so a demonstration needs
   no terminal. Off by default; admin role only; `--demo-kubeconfig` gives

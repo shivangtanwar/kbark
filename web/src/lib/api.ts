@@ -4,7 +4,7 @@
 
 export type Role = 'viewer' | 'approver' | 'admin';
 export interface User { username: string; name: string; role: Role }
-export interface Me { authEnabled: boolean; user: User | null }
+export interface Me { authEnabled: boolean; user: User | null; sso?: { name: string } }
 
 export interface Ref { kind: string; name: string }
 export interface Evidence { label: string; value: string }

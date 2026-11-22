@@ -1,13 +1,25 @@
 import { useState, type FormEvent } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Button, Input } from '../components/ui';
 import { useLive } from '../lib/live';
 
+// Fixed sentences for the short codes the server sends. The codes are
+// kbark's own words: the provider's error text is never reflected here.
+const SSO_ERRORS: Record<string, string> = {
+  state: 'The sign-in request expired or was tampered with. Start again.',
+  provider: 'The sign-in provider refused the sign-in. Start again.',
+  token: 'The sign-in provider did not respond as expected. Start again.',
+  denied: 'This account is not allowed to sign in to kbark.',
+};
+
 export function Login() {
-  const { signIn } = useLive();
+  const { signIn, me } = useLive();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [params] = useSearchParams();
+  const ssoError = params.get('sso_error');
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -30,6 +42,19 @@ export function Login() {
             <p className="text-xs text-fg-3">Approvals are recorded against your account.</p>
           </div>
         </div>
+        {me?.sso && (
+          <a
+            href="/api/oidc/login"
+            className="mb-4 flex h-9 items-center justify-center rounded-lg border border-line-2 bg-raise px-3.5 text-sm font-medium transition-[border-color] hover:border-fg-3"
+          >
+            Sign in with {me.sso.name}
+          </a>
+        )}
+        {ssoError && (SSO_ERRORS[ssoError] || SSO_ERRORS.token) && (
+          <p role="alert" className="mb-4 rounded-lg border border-bad/40 bg-bad-soft px-3 py-2 text-[13px] text-bad">
+            {SSO_ERRORS[ssoError] ?? 'Sign-in failed. Start again.'}
+          </p>
+        )}
         <label className="mb-3 flex flex-col gap-1.5">
           <span className="text-xs font-medium text-fg-2">Username</span>
           <Input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus required />

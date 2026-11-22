@@ -336,8 +336,8 @@ network connection.
 | A fix makes things worse | Dry run, precondition, verification, exact rollback, attempt limit |
 | Rollback proposed when the previous revision was also broken | Proposed only when the failing pods are on the latest revision and an earlier one exists; verification catches the rest |
 | Out-of-memory cause is inferred on some runtimes | Labelled as inferred, with a warning on the proposal (see the playbook) |
-| Accounts are a file | bcrypt hashes, roles and lockout; no single sign-on or second factor yet |
-| Sessions are in memory | A restart signs everyone out; incidents, trends and the audit log are kept |
+| Accounts are a file | bcrypt hashes, roles and lockout; optional OpenID Connect single sign-on; no second factor of kbark's own |
+| Sessions are in memory by default | `--session-file` (on by default when a state file and accounts are in use) keeps hashed sessions across a restart; incidents, trends and the audit log are always kept |
 | One process, no leader election | Run a single instance per cluster |
 
 ## 8. Verification record (16 November 2026)

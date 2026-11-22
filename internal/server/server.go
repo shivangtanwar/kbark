@@ -100,6 +100,8 @@ type Server struct {
 	// Lab, when set, lets an administrator inject demo failures from
 	// the console. It has its own credentials; see package lab.
 	Lab *lab.Lab
+	// OIDC, when set, enables single sign-on on the login page.
+	OIDC *OIDC
 	// gz caches compressed console assets by file name.
 	gz sync.Map
 	// AllowedHosts, when non-empty, is the set of Host header values
@@ -140,6 +142,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.logout)
+	mux.HandleFunc("GET /api/oidc/login", s.oidcLogin)
+	mux.HandleFunc("GET /api/oidc/callback", s.oidcCallback)
 	mux.HandleFunc("GET /api/state", s.state)
 	mux.HandleFunc("GET /api/audit", s.audit)
 	mux.HandleFunc("GET /api/history", s.history)
@@ -272,7 +276,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			user, ok = s.Auth.Session(c.Value)
 		}
 		switch r.URL.Path {
-		case "/api/me", "/api/login", "/api/logout":
+		case "/api/me", "/api/login", "/api/logout", "/api/oidc/login", "/api/oidc/callback":
 		default:
 			if !ok {
 				writeError(w, http.StatusUnauthorized, "sign in required")
@@ -312,12 +316,22 @@ func (s *Server) clientAddr(r *http.Request) string {
 type meResponse struct {
 	AuthEnabled bool       `json:"authEnabled"`
 	User        *auth.User `json:"user"`
+	// SSO tells the login page whether a "Sign in with <name>" button
+	// belongs above the password form, and what to call it.
+	SSO *meSSO `json:"sso,omitempty"`
+}
+
+type meSSO struct {
+	Name string `json:"name"`
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	res := meResponse{AuthEnabled: s.Auth != nil}
 	if u, ok := userFrom(r); ok {
 		res.User = &u
+	}
+	if s.OIDC != nil {
+		res.SSO = &meSSO{Name: s.OIDC.Config.Label()}
 	}
 	writeJSON(w, http.StatusOK, res)
 }

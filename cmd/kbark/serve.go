@@ -52,12 +52,15 @@ type serveOptions struct {
 	policyFile     string
 	stateFile      string
 	authFile       string
+	sessionFile    string
 	publicURL      string
 	notifyWebhook  string
 	notifyEvents   []string
 	confirmOOM     bool
 	insecure       bool
 	trustProxy     bool
+	metricsAddr    string
+	metricsPublic  bool
 }
 
 var serveOpts serveOptions
@@ -100,6 +103,9 @@ func init() {
 	f.BoolVar(&serveOpts.trustProxy, "trust-proxy", false, "Take client addresses from X-Real-IP / X-Forwarded-For; set only when all traffic arrives through your reverse proxy")
 	f.StringVar(&serveOpts.gitTokenEnv, "git-token-env", "KBARK_GITHUB_TOKEN", "Environment variable holding a GitHub token. When it is set, a fix for a workload that declares its Git source (kbark.dev/git-repo, kbark.dev/git-path annotations) can be sent as a pull request instead of being applied live")
 	f.StringVar(&serveOpts.gitAPIURL, "git-api-url", "", "GitHub API address, for GitHub Enterprise (default https://api.github.com)")
+	f.StringVar(&serveOpts.sessionFile, "session-file", "", "File where sign-in sessions survive a restart (default: next to the state file as sessions.json; \"none\" disables)")
+	f.StringVar(&serveOpts.metricsAddr, "metrics-addr", "", "Separate address serving Prometheus metrics, e.g. 127.0.0.1:9108 (off by default). Loopback only unless --metrics-insecure-public is also given")
+	f.BoolVar(&serveOpts.metricsPublic, "metrics-insecure-public", false, "Allow a non-loopback --metrics-addr. Anyone who can reach that port can read cluster and incident counts")
 	f.BoolVar(&serveOpts.demo, "demo", false, "Enable the demo lab: the console can inject sample failures into the kbark-demo namespace, using the same credentials kbark watches with")
 	f.StringVar(&serveOpts.demoKubeconfig, "demo-kubeconfig", "", "Enable the demo lab with separate credentials: a kubeconfig holding one context per watched cluster, with the same names (see deploy/demo-rbac.yaml)")
 	f.BoolVar(&serveOpts.insecure, "insecure-no-auth", false, "Allow a non-loopback --addr without --auth-file. Anyone who can reach the port can approve changes")
@@ -148,6 +154,13 @@ func runServe(_ *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Single sign-on. OIDC's redirect back to the console must be a
+	// stable external address, not whatever socket it ran on.
+	sso, err := buildOIDC(users, o)
+	if err != nil {
+		return err
+	}
+
 	clusters, err := connectClusters(o)
 	if err != nil {
 		return err
@@ -164,6 +177,23 @@ func runServe(_ *cobra.Command, _ []string) error {
 		statePath = ""
 	case statePath == "" && cacheDir != "":
 		statePath = filepath.Join(cacheDir, "kbark", "state.json")
+	}
+	// Sessions persist next to the state file by default, but only when
+	// there is a state file at all and sign-in is on: without accounts
+	// there is nothing to keep.
+	sessionPath := o.sessionFile
+	if o.sessionFile == "" && users != nil && statePath != "" {
+		sessionPath = filepath.Join(filepath.Dir(statePath), "sessions.json")
+	}
+	if sessionPath == "none" {
+		sessionPath = ""
+	}
+	if users != nil {
+		if err := users.EnableSessionPersistence(sessionPath); err != nil {
+			// A bad file means nobody is signed in, not that the server
+			// cannot start: carry on and say so.
+			fmt.Fprintf(os.Stderr, "kbark: warning: %v\n", err)
+		}
 	}
 	audit, err := incident.OpenAudit(auditPath)
 	if err != nil {
@@ -222,7 +252,7 @@ func runServe(_ *cobra.Command, _ []string) error {
 	go func() { engine.Run(ctx); close(done) }()
 
 	srv := &server.Server{
-		Engine: engine, Store: store, Audit: audit, Hub: hub, Auth: users, Notify: hook, Lab: demoLab,
+		Engine: engine, Store: store, Audit: audit, Hub: hub, Auth: users, Notify: hook, Lab: demoLab, OIDC: sso,
 		Info:          server.Info{Version: version.Version, AI: explainer.Name(), AuditPath: auditPath, StatePath: statePath, PublicURL: o.publicURL, Demo: demoLab != nil},
 		AllowedHosts:  allowedHosts,
 		SecureCookies: secureCookies,
@@ -233,6 +263,21 @@ func runServe(_ *cobra.Command, _ []string) error {
 	ln, err := net.Listen("tcp", o.addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", o.addr, err)
+	}
+
+	// Metrics get their own listener so the console never grows an
+	// unauthenticated route: scrapers do not sign in. A non-loopback
+	// address is refused without the explicit opt-in, mirroring --addr
+	// without sign-in.
+	var metricsLn net.Listener
+	if o.metricsAddr != "" {
+		if server.LocalHosts(o.metricsAddr) == nil && !o.metricsPublic {
+			return fmt.Errorf("refusing to serve metrics on %s: anyone who can reach it could read cluster and incident data.\nBind to a loopback address, or pass --metrics-insecure-public if another layer restricts access", o.metricsAddr)
+		}
+		metricsLn, err = net.Listen("tcp", o.metricsAddr)
+		if err != nil {
+			return fmt.Errorf("listen on %s for metrics: %w", o.metricsAddr, err)
+		}
 	}
 
 	names := make([]string, len(clusters))
@@ -247,8 +292,14 @@ func runServe(_ *cobra.Command, _ []string) error {
 	fmt.Printf("  clusters:  %s\n", strings.Join(names, ", "))
 	fmt.Printf("  policy:    %s\n", pol.Source)
 	fmt.Printf("  state:     %s (%d incidents restored)\n", orNone(statePath), restored)
+	if users != nil {
+		fmt.Printf("  sessions:  %s\n", orNone(sessionPath))
+	}
 	fmt.Printf("  audit log: %s\n", orNone(auditPath))
 	fmt.Printf("  AI:        %s\n", aiNote)
+	if metricsLn != nil {
+		fmt.Printf("  metrics:   http://%s/metrics\n", metricsLn.Addr().String())
+	}
 	switch {
 	case users != nil:
 		fmt.Printf("  sign-in:   required (%d users from %s)\n", len(users.Users()), o.authFile)
@@ -256,6 +307,9 @@ func runServe(_ *cobra.Command, _ []string) error {
 		fmt.Println("  sign-in:   NONE on a non-loopback address (--insecure-no-auth). Anyone who can reach this port can approve changes.")
 	default:
 		fmt.Println("  sign-in:   none (localhost only; operator names are self-declared)")
+	}
+	if sso != nil {
+		fmt.Printf("  sso:       %s (%s)\n", sso.Config.Label(), sso.Config.Issuer)
 	}
 	if hook != nil {
 		fmt.Printf("  notify:    webhook at %s\n", hook.Status().Host)
@@ -267,8 +321,15 @@ func runServe(_ *cobra.Command, _ []string) error {
 		fmt.Printf("  demo lab:  ON. Administrators can inject sample failures into namespace %s from the console.\n", lab.Namespace)
 	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() { errCh <- httpSrv.Serve(ln) }()
+	var metricsSrv *http.Server
+	if metricsLn != nil {
+		mux := http.NewServeMux()
+		mux.Handle("GET /metrics", srv.MetricsHandler())
+		metricsSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go func() { errCh <- metricsSrv.Serve(metricsLn) }()
+	}
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -279,6 +340,9 @@ func runServe(_ *cobra.Command, _ []string) error {
 	shutdownCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
 	defer stop()
 	_ = httpSrv.Shutdown(shutdownCtx)
+	if metricsSrv != nil {
+		_ = metricsSrv.Shutdown(shutdownCtx)
+	}
 	// Let the engine write its final state before the process exits.
 	select {
 	case <-done:
