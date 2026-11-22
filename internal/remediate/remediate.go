@@ -71,6 +71,27 @@ func (p *Planner) Plan(ctx context.Context, c *fleet.Cluster, inc *incident.Inci
 		return manual("Storage changes can lose data, so kbark does not make them. Check the PersistentVolumeClaim, its StorageClass and the volume events shown in the evidence.")
 	case detect.FamilyNetwork:
 		return p.planServiceSelector(ctx, c, inc)
+	case detect.FamilyTerminating:
+		return p.planForceDelete(c, inc)
+	case detect.FamilyNode:
+		switch inc.Cause {
+		case detect.CauseNotReady:
+			return manual("kbark cannot repair a node: the kubelet, the machine or its network needs attention from whoever runs the nodes. Kubernetes already keeps new pods off a node that is not Ready and evicts the existing ones after their toleration period. Pods that then hang in Terminating are reported as their own incident, with a fix.")
+		case detect.CauseDiskPressure:
+			return manual("The node is short of disk space and is evicting pods to recover. Freeing or adding disk on the node is outside what kbark changes. Evicted pods and pods over their own storage limit are reported as their own incidents.")
+		case detect.CauseMemoryPressure:
+			return manual("The node is short of memory and is evicting pods to recover. Which workloads to move or give limits to is a capacity decision. Pods killed for their own memory limit are reported as their own incidents.")
+		}
+		return manual("The node reports a resource shortage that kbark does not change. The condition in the evidence names the resource.")
+	case detect.FamilyJob:
+		next := "Fix the cause and create the Job again."
+		if inc.Workload.Kind == "CronJob" {
+			next = "The next scheduled run starts from the CronJob's current template, so a correction there takes effect by itself."
+		}
+		if inc.Cause == detect.CauseDeadline {
+			return manual("The Job ran past its activeDeadlineSeconds and was stopped. Whether it needs more time or is stuck is a judgement about the work it does. A Job's pod template cannot be changed once it exists. %s", next)
+		}
+		return manual("The Job's pods kept failing until it ran out of retries. A Job's pod template cannot be changed once it exists, so there is nothing to fix in place; the explanation and the last pod's log show why it failed. %s", next)
 	case detect.FamilyScheduling:
 		if inc.Cause == detect.CauseCordoned {
 			return p.planUncordon(ctx, c)
@@ -918,6 +939,54 @@ func selectorParam(a *incident.Action, key string) (map[string]string, error) {
 	return m, nil
 }
 
+// --- force-delete-pod ---
+
+// planForceDelete proposes removing the records of deleted pods that
+// cannot finish terminating because their node is down. It is offered
+// only then: on a live node the kubelet is still stopping the
+// container, and a finalizer means someone asked for cleanup first.
+func (p *Planner) planForceDelete(c *fleet.Cluster, inc *incident.Incident) Plan {
+	switch {
+	case inc.Cause == detect.CauseFinalizer:
+		return manual("A finalizer is holding the pod: some controller asked to finish its own cleanup before the pod disappears, and has not. Removing a finalizer skips that cleanup, so kbark does not do it. The evidence names the finalizer; its controller is the place to look.")
+	case inc.Cause != detect.CauseNodeDown:
+		return manual("The pod's node is Ready, so the kubelet is still trying to stop the container (a process that ignores the stop signal, or a volume that will not unmount). Forcing the deletion would remove the record while the container may still be running.")
+	case inc.Workload.Kind == "StatefulSet":
+		return manual("The pod belongs to a StatefulSet and its node is down. Forcing the deletion lets the StatefulSet start a replacement with the same identity while the original may still be running on the unreachable node, which can corrupt data that both write to. Confirm the node is really off, then delete the pod by hand.")
+	}
+	var refs, lines, names []string
+	for _, name := range inc.Pods {
+		pod, err := c.Pods.Pods(inc.Namespace).Get(name)
+		if err != nil || pod.DeletionTimestamp == nil || len(pod.Finalizers) > 0 {
+			continue
+		}
+		names = append(names, name)
+		refs = append(refs, name+"="+string(pod.UID))
+		lines = append(lines, fmt.Sprintf("-pod/%s  (Terminating on node %s, which is down)", name, pod.Spec.NodeName))
+	}
+	if len(refs) == 0 {
+		return manual("The stuck pods are already gone.")
+	}
+	sort.Strings(names)
+	sort.Strings(refs)
+	sort.Strings(lines)
+	title := fmt.Sprintf("Force-delete stuck pod %q", names[0])
+	if len(names) > 1 {
+		title = fmt.Sprintf("Force-delete %d stuck pods of %s", len(names), inc.Workload)
+	}
+	return Plan{Action: &incident.Action{
+		Type:       incident.ActionForceDeletePod,
+		TargetKind: "Pod", TargetName: names[0],
+		Params:     map[string]string{"pods": strings.Join(refs, ",")},
+		Title:      title,
+		Rationale:  "The pod was deleted, but its node is not Ready, so no kubelet can confirm that the containers stopped and the record never clears. Until it does, the controller counts the pod as present. Removing the record lets the controller start a replacement on a healthy node.",
+		Risk:       "medium",
+		Diff:       fmt.Sprintf("--- namespace/%s pods (current)\n+++ namespace/%s pods (proposed)\n%s\n", inc.Namespace, inc.Namespace, strings.Join(lines, "\n")),
+		Warnings:   []string{"If the node is only cut off from the control plane and not actually off, the old container may still be running there. For workloads where two copies must never run at once, confirm the node is down before approving."},
+		Reversible: false,
+	}}
+}
+
 // --- uncordon-node ---
 
 func (p *Planner) planUncordon(ctx context.Context, c *fleet.Cluster) Plan {
@@ -1019,7 +1088,7 @@ func Apply(ctx context.Context, c *fleet.Cluster, ns string, a *incident.Action)
 		if a.Type == incident.ActionRollbackWorkload && a.Params["pods"] != "" {
 			// The template is already restored; a pod that is gone or
 			// replaced by now needs nothing more.
-			if _, err := deletePods(ctx, c, ns, a.Params["pods"]); err != nil {
+			if _, err := deletePods(ctx, c, ns, a.Params["pods"], false); err != nil {
 				return undo, fmt.Errorf("the template was restored, but a broken pod could not be deleted: %w", err)
 			}
 		}
@@ -1049,8 +1118,8 @@ func Apply(ctx context.Context, c *fleet.Cluster, ns string, a *incident.Action)
 		}
 		return &incident.Undo{}, nil
 
-	case incident.ActionDeletePod, incident.ActionRestartPod:
-		deleted, err := deletePods(ctx, c, ns, a.Params["pods"])
+	case incident.ActionDeletePod, incident.ActionRestartPod, incident.ActionForceDeletePod:
+		deleted, err := deletePods(ctx, c, ns, a.Params["pods"], a.Type == incident.ActionForceDeletePod)
 		if err != nil {
 			return nil, err
 		}
@@ -1064,7 +1133,9 @@ func Apply(ctx context.Context, c *fleet.Cluster, ns string, a *incident.Action)
 
 // deletePods deletes the pods in a "name=uid,name=uid" list, each only
 // if it is still the pod that was shown to the approver.
-func deletePods(ctx context.Context, c *fleet.Cluster, ns, refs string) (int, error) {
+// force deletes with no grace period, which is what removes a record
+// no kubelet is going to confirm.
+func deletePods(ctx context.Context, c *fleet.Cluster, ns, refs string, force bool) (int, error) {
 	deleted := 0
 	for _, ref := range strings.Split(refs, ",") {
 		name, uid, ok := strings.Cut(ref, "=")
@@ -1072,7 +1143,12 @@ func deletePods(ctx context.Context, c *fleet.Cluster, ns, refs string) (int, er
 			continue
 		}
 		id := types.UID(uid)
-		err := c.Client.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &id}})
+		opts := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &id}}
+		if force {
+			zero := int64(0)
+			opts.GracePeriodSeconds = &zero
+		}
+		err := c.Client.CoreV1().Pods(ns).Delete(ctx, name, opts)
 		switch {
 		case err == nil:
 			deleted++

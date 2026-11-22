@@ -71,8 +71,11 @@ func oomHarness(t *testing.T, cfg Config) *harness {
 	cfg.Planner = &remediate.Planner{MemoryCeiling: resource.MustParse("2Gi")}
 	e := New([]*fleet.Cluster{c}, store, cfg, nil)
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go e.Run(ctx)
+	stopped := make(chan struct{})
+	// Run saves its state as it stops; wait for that so the write
+	// cannot race the removal of a test's temporary directory.
+	t.Cleanup(func() { cancel(); <-stopped })
+	go func() { e.Run(ctx); close(stopped) }()
 	return &harness{t: t, engine: e, store: store, audit: audit, cluster: c, client: client}
 }
 

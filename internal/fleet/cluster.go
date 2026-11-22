@@ -14,11 +14,14 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	appslisters "k8s.io/client-go/listers/apps/v1"
+	batchlisters "k8s.io/client-go/listers/batch/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
@@ -58,6 +61,7 @@ type Cluster struct {
 	StatefulSets appslisters.StatefulSetLister
 	DaemonSets   appslisters.DaemonSetLister
 	Revisions    appslisters.ControllerRevisionLister
+	Jobs         batchlisters.JobLister
 
 	mu     sync.RWMutex
 	synced bool
@@ -124,6 +128,7 @@ func New(name string, client kubernetes.Interface) *Cluster {
 	c.StatefulSets = apps.StatefulSets().Lister()
 	c.DaemonSets = apps.DaemonSets().Lister()
 	c.Revisions = apps.ControllerRevisions().Lister()
+	c.Jobs = f.Batch().V1().Jobs().Lister()
 
 	ev := core.Events().Informer()
 	_ = ev.AddIndexers(cache.Indexers{eventsByUID: func(obj any) ([]string, error) {
@@ -231,9 +236,24 @@ func (c *Cluster) Owner(pod *corev1.Pod) Ref {
 				}
 			}
 		}
+		if o.Kind == "Job" {
+			if job, err := c.Jobs.Jobs(pod.Namespace).Get(o.Name); err == nil {
+				return jobOwner(job)
+			}
+		}
 		return Ref{Kind: o.Kind, Name: o.Name}
 	}
 	return Ref{Kind: "Pod", Name: pod.Name}
+}
+
+// jobOwner is the CronJob that created a Job, or the Job itself.
+func jobOwner(job *batchv1.Job) Ref {
+	for _, o := range job.OwnerReferences {
+		if o.Controller != nil && *o.Controller && o.Kind == "CronJob" {
+			return Ref{Kind: "CronJob", Name: o.Name}
+		}
+	}
+	return Ref{Kind: "Job", Name: job.Name}
 }
 
 // Observation is one failing workload: every pod of the workload that
@@ -292,8 +312,10 @@ func (c *Cluster) Scan(now time.Time) Snapshot {
 	}
 
 	nodes, _ := c.Nodes.List(labels.Everything())
+	nodeUp := map[string]bool{}
 	for _, n := range nodes {
 		snap.Summary.Nodes++
+		nodeUp[n.Name] = nodeReady(n)
 		if nodeReady(n) {
 			snap.Summary.NodesReady++
 		}
@@ -309,6 +331,16 @@ func (c *Cluster) Scan(now time.Time) Snapshot {
 		namespaces[p.Namespace] = true
 		owner := c.Owner(p)
 		findings := detect.Pod(p, c.EventsFor(string(p.UID)), now)
+		if f, ok := detect.Terminating(p, now); ok {
+			// With no live kubelet behind the pod, nothing will ever
+			// confirm that its containers stopped.
+			if f.Cause == detect.CauseUnknown && p.Spec.NodeName != "" && !nodeUp[p.Spec.NodeName] {
+				f.Cause = detect.CauseNodeDown
+				f.Summary = "pod was deleted, but its node is down and cannot confirm it stopped"
+				f.Evidence = append(f.Evidence, detect.Evidence{Label: "Node state", Value: "not Ready or gone"})
+			}
+			findings = []detect.Finding{f}
+		}
 		for i, f := range findings {
 			// An eviction for exceeding a limit that the workload no
 			// longer has is history: only the dead record is left.
@@ -350,6 +382,16 @@ func (c *Cluster) Scan(now time.Time) Snapshot {
 	for _, o := range c.serviceObservations(pods) {
 		o := o
 		byKey[o.Key] = &o
+	}
+	for _, o := range c.nodeObservations(nodes, pods, now) {
+		o := o
+		byKey[o.Key] = &o
+	}
+	for _, o := range c.jobObservations(pods, now) {
+		o := o
+		if _, ok := byKey[o.Key]; !ok {
+			byKey[o.Key] = &o
+		}
 	}
 	for _, o := range c.creationObservations(now) {
 		o := o
@@ -528,6 +570,65 @@ func (c *Cluster) creationObservations(now time.Time) []Observation {
 	dss, _ := c.DaemonSets.List(labels.Everything())
 	for _, d := range dss {
 		add(d.Namespace, Ref{Kind: "DaemonSet", Name: d.Name}, string(d.UID), d.Status.CurrentNumberScheduled, d.Status.DesiredNumberScheduled)
+	}
+	return out
+}
+
+// nodeObservations reports nodes that are not Ready or under pressure.
+// A node belongs to no namespace, so these incidents have none.
+func (c *Cluster) nodeObservations(nodes []*corev1.Node, pods []*corev1.Pod, now time.Time) []Observation {
+	var out []Observation
+	for _, n := range nodes {
+		f, ok := detect.Node(n, now)
+		if !ok {
+			continue
+		}
+		running := 0
+		for _, p := range pods {
+			if p.Spec.NodeName == n.Name && p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
+				running++
+			}
+		}
+		f.Evidence = append(f.Evidence, detect.Evidence{Label: "Pods assigned to it", Value: fmt.Sprint(running)})
+		ref := Ref{Kind: "Node", Name: n.Name}
+		out = append(out, Observation{Key: Key("", ref, detect.FamilyNode), Workload: ref, Finding: f, Pods: []string{}})
+	}
+	return out
+}
+
+// jobObservations reports Jobs that gave up. A Job created by a
+// CronJob is not reported once a later run of that CronJob succeeded.
+func (c *Cluster) jobObservations(pods []*corev1.Pod, now time.Time) []Observation {
+	jobs, _ := c.Jobs.List(labels.Everything())
+	lastSuccess := map[string]time.Time{}
+	for _, j := range jobs {
+		if j.Status.Succeeded > 0 && j.Status.CompletionTime != nil {
+			k := j.Namespace + "/" + jobOwner(j).String()
+			if j.Status.CompletionTime.After(lastSuccess[k]) {
+				lastSuccess[k] = j.Status.CompletionTime.Time
+			}
+		}
+	}
+	var out []Observation
+	for _, j := range jobs {
+		f, ok := detect.Job(j, now)
+		if !ok {
+			continue
+		}
+		ref := jobOwner(j)
+		if ref.Kind == "CronJob" && lastSuccess[j.Namespace+"/"+ref.String()].After(j.CreationTimestamp.Time) {
+			continue
+		}
+		if ref.Kind == "CronJob" {
+			f.Evidence = append(f.Evidence, detect.Evidence{Label: "Job", Value: j.Name})
+		}
+		names := []string{}
+		for _, p := range pods {
+			if p.Namespace == j.Namespace && metav1.IsControlledBy(p, j) {
+				names = append(names, p.Name)
+			}
+		}
+		out = append(out, Observation{Key: Key(j.Namespace, ref, detect.FamilyJob), Namespace: j.Namespace, Workload: ref, Finding: f, Pods: names})
 	}
 	return out
 }

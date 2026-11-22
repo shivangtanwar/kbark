@@ -70,6 +70,7 @@ func (d Decision) Allows(action string) bool { return d.actions == nil || d.acti
 var KnownActions = []string{
 	"set-memory-limit", "rollback-workload", "tune-probe", "delete-pod", "restart-pod", "uncordon-node",
 	"set-ephemeral-storage-limit", "set-image-pull-policy", "fix-service-selector",
+	"force-delete-pod",
 }
 
 // Default builds the built-in policy: the given namespaces are

@@ -161,8 +161,11 @@ func TestExplanationIsRetriedAfterRestartWithAProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go e2.Run(ctx)
+	stopped := make(chan struct{})
+	go func() { e2.Run(ctx); close(stopped) }()
+	// Run writes the state file once more as it stops. Wait for that,
+	// or the write races the removal of the test's temporary directory.
+	defer func() { cancel(); <-stopped }()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if got, _ := store.Get(inc.ID); got != nil && got.ExplanationState == incident.ExplainReady {

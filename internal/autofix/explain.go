@@ -171,7 +171,7 @@ func containerLogs(ctx context.Context, c *fleet.Cluster, inc *incident.Incident
 		return ""
 	}
 	switch inc.Family {
-	case detect.FamilyCrash, detect.FamilyOOM, detect.FamilyProbe:
+	case detect.FamilyCrash, detect.FamilyOOM, detect.FamilyProbe, detect.FamilyJob:
 	default:
 		return ""
 	}

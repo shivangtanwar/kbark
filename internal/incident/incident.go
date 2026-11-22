@@ -63,6 +63,9 @@ const (
 	// ActionFixServiceSelector points a Service's selector at the pods
 	// whose labels it nearly matches.
 	ActionFixServiceSelector = "fix-service-selector"
+	// ActionForceDeletePod removes the record of a deleted pod whose
+	// node is down, so its controller can replace it.
+	ActionForceDeletePod = "force-delete-pod"
 )
 
 // Action is one typed, previewable change. It is data, not a command:

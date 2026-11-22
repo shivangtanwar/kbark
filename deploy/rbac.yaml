@@ -6,8 +6,9 @@
 #   set-image-pull-policy, rollback-workload -> update on workloads
 #   fix-service-selector                     -> update on services
 #   uncordon-node                            -> patch on nodes
-#   delete-pod, restart-pod, and the broken
-#   pods of a StatefulSet rollback           -> delete on pods
+#   delete-pod, restart-pod, force-delete-pod,
+#   and the broken pods of a StatefulSet
+#   rollback                                 -> delete on pods
 #
 # Deliberately absent: secrets (kbark never reads Secret values),
 # configmaps, create on anything, pods/exec, and every RBAC resource.
@@ -44,6 +45,10 @@ rules:
     # controllerrevisions hold the revision history of StatefulSets and
     # DaemonSets, which rollback reads.
     resources: [deployments, statefulsets, daemonsets, replicasets, controllerrevisions]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    # Read only: kbark reports failed Jobs and never changes them.
+    resources: [jobs]
     verbs: [get, list, watch]
   - apiGroups: [apps]
     resources: [deployments, statefulsets, daemonsets]

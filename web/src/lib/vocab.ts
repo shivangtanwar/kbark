@@ -38,6 +38,7 @@ export const FAMILIES: Record<string, string> = {
   'config': 'Missing configuration', 'probe': 'Health probe failure', 'scheduling': 'Unschedulable',
   'storage': 'Storage failure', 'evicted': 'Evicted pod', 'network': 'Service without endpoints',
   'disk': 'Local disk limit exceeded', 'admission': 'Pods refused at creation',
+  'node': 'Node not healthy', 'terminating': 'Pod stuck terminating', 'job': 'Failed job',
 };
 
 export const ACTIONS: Record<string, string> = {
@@ -46,6 +47,7 @@ export const ACTIONS: Record<string, string> = {
   'restart-pod': 'Replace unhealthy pod', 'uncordon-node': 'Uncordon node',
   'set-ephemeral-storage-limit': 'Raise local disk limit', 'set-image-pull-policy': 'Allow image pull',
   'fix-service-selector': 'Correct Service selector',
+  'force-delete-pod': 'Force-delete stuck pod',
 };
 
 export const family = (f: string) => FAMILIES[f] ?? f;

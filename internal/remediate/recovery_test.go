@@ -9,6 +9,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -338,5 +339,140 @@ func TestDaemonSetRollbackUsesControllerRevisions(t *testing.T) {
 func TestDiskFixIsHeldLongEnoughToRefill(t *testing.T) {
 	if got := HoldFor(&incident.Action{Type: incident.ActionSetEphemeralLimit}, 15*time.Second); got != time.Minute {
 		t.Errorf("hold = %s, want 1m", got)
+	}
+}
+
+func downNode(name string) *corev1.Node {
+	n := tk.Node(name, false)
+	n.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionUnknown, LastTransitionTime: metav1.NewTime(time.Now().Add(-10 * time.Minute))}}
+	return n
+}
+
+// stuck returns a pod of rs that was deleted ten minutes ago on node.
+func stuck(rs *appsv1.ReplicaSet, node string, finalizers ...string) *corev1.Pod {
+	p := tk.Pod(rs, "gone", running())
+	d := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	p.DeletionTimestamp, p.Finalizers, p.Spec.NodeName = &d, finalizers, node
+	return p
+}
+
+// terminatingIncident returns the pod-stuck-terminating incident among
+// whatever else the scan reports (a down node is its own incident).
+func terminatingIncident(t *testing.T, c *fleet.Cluster) *incident.Incident {
+	t.Helper()
+	for _, inc := range incident.NewStore(nil, nil).Observe(c.Name, c.Scan(time.Now()).Observations, time.Now()) {
+		if inc.Family == detect.FamilyTerminating {
+			return inc
+		}
+	}
+	t.Fatal("no terminating incident")
+	return nil
+}
+
+func TestForceDeleteWhenTheNodeIsDown(t *testing.T) {
+	d := tk.Deployment("api", tk.Container("api:1"))
+	rs := tk.ReplicaSet(d, "1", tk.Container("api:1"))
+	pod := stuck(rs, "n1")
+	c, client := tk.Cluster(t, "a", d, rs, pod, downNode("n1"))
+
+	inc := terminatingIncident(t, c)
+	if inc.Cause != detect.CauseNodeDown {
+		t.Fatalf("cause = %q, want node-down", inc.Cause)
+	}
+	plan := planner().Plan(ctx, c, inc)
+	a := plan.Action
+	if a == nil || a.Type != incident.ActionForceDeletePod || a.Reversible || a.Risk != "medium" || len(a.Warnings) == 0 {
+		t.Fatalf("want a medium-risk, irreversible force-delete with a warning, got %+v", plan)
+	}
+	if _, err := Apply(ctx, c, tk.NS, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().Pods(tk.NS).Get(ctx, pod.Name, metav1.GetOptions{}); err == nil {
+		t.Error("the stuck pod record is still there")
+	}
+}
+
+func TestStuckPodsThatMustNotBeForced(t *testing.T) {
+	d := tk.Deployment("api", tk.Container("api:1"))
+	rs := tk.ReplicaSet(d, "1", tk.Container("api:1"))
+
+	t.Run("node is alive", func(t *testing.T) {
+		c, _ := tk.Cluster(t, "a", d, rs, stuck(rs, "n1"), tk.Node("n1", false))
+		if plan := planner().Plan(ctx, c, terminatingIncident(t, c)); plan.Action != nil || !strings.Contains(plan.Manual, "kubelet is still trying") {
+			t.Fatalf("a pod on a live node must not be forced, got %+v", plan)
+		}
+	})
+	t.Run("held by a finalizer", func(t *testing.T) {
+		c, _ := tk.Cluster(t, "a", d, rs, stuck(rs, "n1", "example.com/cleanup"), downNode("n1"))
+		inc := terminatingIncident(t, c)
+		if plan := planner().Plan(ctx, c, inc); inc.Cause != detect.CauseFinalizer || plan.Action != nil {
+			t.Fatalf("a finalizer must not be bypassed: cause %q, plan %+v", inc.Cause, plan)
+		}
+	})
+	t.Run("statefulset", func(t *testing.T) {
+		sts := statefulSet("db", tk.Container("db:1"))
+		yes := true
+		pod := stuck(rs, "n1")
+		pod.Name, pod.OwnerReferences = "db-0", []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "StatefulSet", Name: "db", UID: sts.UID, Controller: &yes}}
+		c, _ := tk.Cluster(t, "a", sts, pod, downNode("n1"))
+		if plan := planner().Plan(ctx, c, terminatingIncident(t, c)); plan.Action != nil || !strings.Contains(plan.Manual, "same identity") {
+			t.Fatalf("a StatefulSet pod must not be forced, got %+v", plan)
+		}
+	})
+}
+
+func TestNodeAndJobIncidentsAreExplainedNotFixed(t *testing.T) {
+	two := int32(2)
+	yes := true
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "report-2901", Namespace: tk.NS, UID: "job-1", CreationTimestamp: metav1.NewTime(time.Now().Add(-5 * time.Minute)),
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "CronJob", Name: "report", UID: "cj", Controller: &yes}},
+		},
+		Spec: batchv1.JobSpec{BackoffLimit: &two, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "report"}}}}},
+		Status: batchv1.JobStatus{Failed: 3, Conditions: []batchv1.JobCondition{
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded", LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Minute))},
+		}},
+	}
+	c, _ := tk.Cluster(t, "a", job, downNode("n1"))
+	got := map[detect.Family]*incident.Incident{}
+	for _, inc := range incident.NewStore(nil, nil).Observe(c.Name, c.Scan(time.Now()).Observations, time.Now()) {
+		got[inc.Family] = inc
+	}
+	jobInc, nodeInc := got[detect.FamilyJob], got[detect.FamilyNode]
+	if jobInc == nil || nodeInc == nil {
+		t.Fatalf("want a job and a node incident, got %v", got)
+	}
+	if jobInc.Workload != (fleet.Ref{Kind: "CronJob", Name: "report"}) {
+		t.Errorf("a CronJob's failed run belongs to the CronJob, got %s", jobInc.Workload)
+	}
+	if plan := planner().Plan(ctx, c, jobInc); plan.Action != nil || !strings.Contains(plan.Manual, "next scheduled run") {
+		t.Errorf("job plan = %+v", plan)
+	}
+	if nodeInc.Namespace != "" || nodeInc.Workload.Kind != "Node" {
+		t.Errorf("node incident = %s in %q", nodeInc.Workload, nodeInc.Namespace)
+	}
+	if plan := planner().Plan(ctx, c, nodeInc); plan.Action != nil || !strings.Contains(plan.Manual, "cannot repair a node") {
+		t.Errorf("node plan = %+v", plan)
+	}
+}
+
+func TestLaterSuccessfulRunClearsACronJobFailure(t *testing.T) {
+	yes := true
+	owner := []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "CronJob", Name: "report", UID: "cj", Controller: &yes}}
+	failed := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "report-1", Namespace: tk.NS, UID: "j1", OwnerReferences: owner, CreationTimestamp: metav1.NewTime(time.Now().Add(-20 * time.Minute))},
+		Status: batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded", LastTransitionTime: metav1.NewTime(time.Now().Add(-15 * time.Minute))},
+		}},
+	}
+	done := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	ok := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "report-2", Namespace: tk.NS, UID: "j2", OwnerReferences: owner, CreationTimestamp: metav1.NewTime(time.Now().Add(-5 * time.Minute))},
+		Status:     batchv1.JobStatus{Succeeded: 1, CompletionTime: &done},
+	}
+	c, _ := tk.Cluster(t, "a", failed, ok)
+	if obs := c.Scan(time.Now()).Observations; len(obs) != 0 {
+		t.Fatalf("the CronJob has since succeeded; want nothing reported, got %+v", obs)
 	}
 }
