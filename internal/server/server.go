@@ -147,6 +147,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stream", s.stream)
 	mux.HandleFunc("GET /api/incidents/{id}", s.incident)
 	mux.HandleFunc("POST /api/incidents/{id}/{verb}", s.act)
+	mux.HandleFunc("POST /api/standing/{id}/revoke", s.revokeStanding)
 	mux.HandleFunc("GET /api/demo", s.demo)
 	mux.HandleFunc("POST /api/demo/{cluster}/{scenario}", s.demoRun)
 	mux.Handle("GET /", s.static())
@@ -367,10 +368,12 @@ type State struct {
 	Clusters  []fleet.Summary      `json:"clusters"`
 	Pods      []fleet.PodRow       `json:"pods"`
 	Incidents []*incident.Incident `json:"incidents"`
+	// Standing lists the standing approvals, active ones first.
+	Standing []autofix.Standing `json:"standing"`
 }
 
 func (s *Server) snapshot() State {
-	st := State{Info: s.Info, Now: time.Now().UTC(), Clusters: []fleet.Summary{}, Pods: []fleet.PodRow{}, Incidents: s.Store.List()}
+	st := State{Info: s.Info, Now: time.Now().UTC(), Clusters: []fleet.Summary{}, Pods: []fleet.PodRow{}, Incidents: s.Store.List(), Standing: s.Engine.Standings()}
 	for _, snap := range s.Engine.Snapshots() {
 		st.Clusters = append(st.Clusters, snap.Summary)
 		st.Pods = append(st.Pods, snap.Pods...)
@@ -432,6 +435,8 @@ func (s *Server) incident(w http.ResponseWriter, r *http.Request) {
 type actRequest struct {
 	Operator string `json:"operator"`
 	Reason   string `json:"reason"`
+	// Standing, on approve, also grants a standing approval.
+	Standing bool `json:"standing"`
 }
 
 func (s *Server) act(w http.ResponseWriter, r *http.Request) {
@@ -462,7 +467,7 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch r.PathValue("verb") {
 	case "approve":
-		inc, err = s.Engine.Approve(ctx, id, req.Operator)
+		inc, err = s.Engine.ApproveWith(ctx, id, req.Operator, autofix.ApproveOptions{Standing: req.Standing})
 	case "reject":
 		inc, err = s.Engine.Reject(id, req.Operator, req.Reason)
 	case "rollback":
@@ -478,6 +483,34 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, inc)
+}
+
+// revokeStanding ends a standing approval. Anyone who may approve may
+// also take an approval back.
+func (s *Server) revokeStanding(w http.ResponseWriter, r *http.Request) {
+	var req actRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if s.Auth != nil {
+		u, ok := userFrom(r)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "sign in required")
+			return
+		}
+		if !u.CanApprove() {
+			writeError(w, http.StatusForbidden, "your role is viewer; revoking a standing approval needs the approver role")
+			return
+		}
+		req.Operator = u.Name
+	}
+	st, err := s.Engine.Revoke(r.PathValue("id"), req.Operator, req.Reason)
+	if err != nil {
+		writeError(w, statusFor(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
 }
 
 // Demo is the demo lab as the console sees it.
@@ -538,6 +571,10 @@ func statusFor(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, autofix.ErrOperatorRequired):
 		return http.StatusBadRequest
+	case errors.Is(err, autofix.ErrStandingNotAllowed):
+		return http.StatusForbidden
+	case errors.Is(err, autofix.ErrStandingNotFound):
+		return http.StatusNotFound
 	}
 	return http.StatusBadGateway
 }

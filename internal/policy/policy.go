@@ -35,6 +35,8 @@ type Rule struct {
 	Actions []string `json:"actions,omitempty"`
 	// MemoryCeiling overrides the default for this rule.
 	MemoryCeiling string `json:"memory_ceiling,omitempty"`
+	// StandingApprovals overrides the default for this rule.
+	StandingApprovals string `json:"standing_approvals,omitempty"`
 }
 
 // Defaults apply where a rule does not override them.
@@ -42,6 +44,13 @@ type Defaults struct {
 	MemoryCeiling string `json:"memory_ceiling,omitempty"`
 	MaxAttempts   int    `json:"max_attempts,omitempty"`
 	AttemptWindow string `json:"attempt_window,omitempty"`
+	// StandingApprovals says whether an approver may let a fix be
+	// applied automatically the next time: "off" (the default) or
+	// "low-risk". Nothing else is offered: a medium-risk fix always
+	// needs a person each time.
+	StandingApprovals string `json:"standing_approvals,omitempty"`
+	// StandingTTL is how long a standing approval lasts (default 720h).
+	StandingTTL string `json:"standing_ttl,omitempty"`
 }
 
 // Policy is the parsed file.
@@ -61,7 +70,21 @@ type Decision struct {
 	MemoryCeiling resource.Quantity
 	MaxAttempts   int
 	AttemptWindow time.Duration
+	// Standing reports that standing approvals of low-risk fixes are
+	// permitted here; StandingTTL is how long one lasts.
+	Standing    bool
+	StandingTTL time.Duration
 }
+
+// Values of standing_approvals.
+const (
+	StandingOff     = "off"
+	StandingLowRisk = "low-risk"
+)
+
+const defaultStandingTTL = 30 * 24 * time.Hour
+
+func validStanding(v string) bool { return v == "" || v == StandingOff || v == StandingLowRisk }
 
 // Allows reports whether an action type may be proposed.
 func (d Decision) Allows(action string) bool { return d.actions == nil || d.actions[action] }
@@ -124,6 +147,14 @@ func (p *Policy) Validate() error {
 	if p.Defaults.MaxAttempts < 1 {
 		return fmt.Errorf("defaults.max_attempts must be at least 1")
 	}
+	if !validStanding(p.Defaults.StandingApprovals) {
+		return fmt.Errorf("defaults.standing_approvals %q: want %q or %q", p.Defaults.StandingApprovals, StandingOff, StandingLowRisk)
+	}
+	if p.Defaults.StandingTTL != "" {
+		if d, err := time.ParseDuration(p.Defaults.StandingTTL); err != nil || d <= 0 {
+			return fmt.Errorf("defaults.standing_ttl %q is not a positive duration", p.Defaults.StandingTTL)
+		}
+	}
 	known := map[string]bool{}
 	for _, a := range KnownActions {
 		known[a] = true
@@ -137,6 +168,9 @@ func (p *Policy) Validate() error {
 			if !known[a] {
 				return fmt.Errorf("%s.actions: unknown action %q", where, a)
 			}
+		}
+		if !validStanding(r.StandingApprovals) {
+			return fmt.Errorf("%s.standing_approvals %q: want %q or %q", where, r.StandingApprovals, StandingOff, StandingLowRisk)
 		}
 		if r.MemoryCeiling != "" {
 			if _, err := resource.ParseQuantity(r.MemoryCeiling); err != nil {
@@ -158,6 +192,11 @@ func (p *Policy) For(cluster, namespace string) Decision {
 	d := Decision{MaxAttempts: p.Defaults.MaxAttempts}
 	d.MemoryCeiling = resource.MustParse(p.Defaults.MemoryCeiling)
 	d.AttemptWindow, _ = time.ParseDuration(p.Defaults.AttemptWindow)
+	d.Standing = p.Defaults.StandingApprovals == StandingLowRisk
+	d.StandingTTL = defaultStandingTTL
+	if ttl, err := time.ParseDuration(p.Defaults.StandingTTL); err == nil && ttl > 0 {
+		d.StandingTTL = ttl
+	}
 	for i, r := range p.Rules {
 		if !matches(r.Clusters, cluster) || !matches(r.Namespaces, namespace) {
 			continue
@@ -176,6 +215,11 @@ func (p *Policy) For(cluster, namespace string) Decision {
 		if r.MemoryCeiling != "" {
 			d.MemoryCeiling = resource.MustParse(r.MemoryCeiling)
 		}
+		if r.StandingApprovals != "" {
+			d.Standing = r.StandingApprovals == StandingLowRisk
+		}
+		// Where kbark may not propose at all, nothing can be standing.
+		d.Standing = d.Standing && !d.DetectOnly
 		break
 	}
 	return d

@@ -106,6 +106,12 @@ var scenarios = []Scenario{
 		run:    rollout("StatefulSet", "ledger", "ledger-v1.yaml", "ledger-v2.yaml"),
 	},
 	{
+		ID: "ds-crash", Workload: "node-agent", Title: "Crashing DaemonSet rollout", Group: "Rollouts", Risk: "medium",
+		Breaks: "Rolls the node-agent DaemonSet to a revision that exits on start.",
+		Expect: "Roll the DaemonSet back to revision 1.",
+		run:    rollout("DaemonSet", "node-agent", "agent-v1.yaml", "agent-v2.yaml"),
+	},
+	{
 		ID: "slow-start", Workload: "slow-start", Title: "Liveness probe kills a slow starter", Group: "Probes", Risk: "low",
 		Breaks: "Deploys an application that needs longer to start than its liveness probe allows.",
 		Expect: "Relax the probe's initial delay and timeout.",
@@ -157,6 +163,19 @@ var scenarios = []Scenario{
 		Expect: "Uncordon the node.",
 		Note:   "Nothing else can be scheduled on this cluster until the fix is approved or the namespace is reset.",
 		run:    cordonAndDeploy,
+	},
+	{
+		ID: "failed-job", Workload: "nightly-report", Title: "Job that gives up", Group: "Jobs and stuck pods", Risk: "",
+		Breaks: "Runs the nightly-report Job, whose two attempts both fail.",
+		Expect: "No automatic fix: a Job cannot be changed once it exists. kbark explains the failure from the pod's log.",
+		run:    failingJob,
+	},
+	{
+		ID: "stuck-finalizer", Workload: "export-7f6c9", Title: "Pod stuck terminating", Group: "Jobs and stuck pods", Risk: "",
+		Breaks: "Deletes a pod that a finalizer is holding, so it never goes away.",
+		Expect: "No automatic fix: kbark names the finalizer and refuses to bypass it. (It force-deletes only when the pod's node is down.)",
+		Note:   "Reported once the pod is two minutes past its deletion deadline.",
+		run:    heldPod,
 	},
 	{
 		ID: "fix-config", Workload: "reports", Title: "Create the missing ConfigMap", Group: "Helpers", Risk: "",
@@ -341,9 +360,11 @@ func (l *Lab) log(cluster, scenario, actor, note string) {
 var resources = map[string]schema.GroupVersionResource{
 	"Deployment":  {Group: "apps", Version: "v1", Resource: "deployments"},
 	"StatefulSet": {Group: "apps", Version: "v1", Resource: "statefulsets"},
+	"DaemonSet":   {Group: "apps", Version: "v1", Resource: "daemonsets"},
 	"Service":     {Version: "v1", Resource: "services"},
 	"ConfigMap":   {Version: "v1", Resource: "configmaps"},
 	"Pod":         {Version: "v1", Resource: "pods"},
+	"Job":         {Group: "batch", Version: "v1", Resource: "jobs"},
 }
 
 // applyFile server-side-applies every object in a fixture. Objects of
@@ -445,6 +466,13 @@ func isReady(ctx context.Context, t *target, kind, name string) (bool, error) {
 		}
 		n := want(s.Spec.Replicas)
 		return s.Status.ObservedGeneration >= s.Generation && s.Status.UpdatedReplicas == n && s.Status.ReadyReplicas == n, nil
+	case "DaemonSet":
+		d, err := t.kube.AppsV1().DaemonSets(Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		n := d.Status.DesiredNumberScheduled
+		return d.Status.ObservedGeneration >= d.Generation && n > 0 && d.Status.UpdatedNumberScheduled == n && d.Status.NumberReady == n, nil
 	}
 	return false, fmt.Errorf("cannot wait for a %s", kind)
 }
@@ -511,6 +539,43 @@ func corruptOnePod(ctx context.Context, t *target, step func(string)) error {
 	return err
 }
 
+// failingJob runs the Job afresh: a Job's spec cannot be changed, so an
+// earlier run has to be removed first.
+func failingJob(ctx context.Context, t *target, step func(string)) error {
+	step("removing the previous run")
+	bg := metav1.DeletePropagationBackground
+	err := t.kube.BatchV1().Jobs(Namespace).Delete(ctx, "nightly-report", metav1.DeleteOptions{PropagationPolicy: &bg})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	for i := 0; i < 30; i++ {
+		if _, err := t.kube.BatchV1().Jobs(Namespace).Get(ctx, "nightly-report", metav1.GetOptions{}); apierrors.IsNotFound(err) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	step("applying failed-job.yaml")
+	return applyFile(ctx, t, "failed-job.yaml")
+}
+
+func heldPod(ctx context.Context, t *target, step func(string)) error {
+	step("creating a pod with a finalizer")
+	if err := applyFile(ctx, t, "stuck-finalizer.yaml"); err != nil {
+		return err
+	}
+	step("deleting it")
+	zero := int64(0)
+	err := t.kube.CoreV1().Pods(Namespace).Delete(ctx, "export-7f6c9", metav1.DeleteOptions{GracePeriodSeconds: &zero})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
 // resetNamespace removes everything the scenarios created and restores
 // the healthy baseline. It never deletes the namespace itself, so the
 // lab needs no cluster-wide delete permission.
@@ -521,7 +586,8 @@ func resetNamespace(ctx context.Context, t *target, step func(string)) error {
 	}
 	step("removing demo workloads")
 	zero := int64(0)
-	for _, kind := range []string{"Deployment", "StatefulSet", "Service", "ConfigMap", "Pod"} {
+	bg := metav1.DeletePropagationBackground
+	for _, kind := range []string{"Deployment", "StatefulSet", "DaemonSet", "Job", "Service", "ConfigMap", "Pod"} {
 		res := t.dyn.Resource(resources[kind]).Namespace(Namespace)
 		list, err := res.List(ctx, metav1.ListOptions{})
 		if err != nil {
@@ -531,9 +597,13 @@ func resetNamespace(ctx context.Context, t *target, step func(string)) error {
 			if kind == "ConfigMap" && o.GetName() == "kube-root-ca.crt" {
 				continue
 			}
-			opts := metav1.DeleteOptions{}
+			opts := metav1.DeleteOptions{PropagationPolicy: &bg}
 			if kind == "Pod" {
 				opts.GracePeriodSeconds = &zero
+				if len(o.GetFinalizers()) > 0 {
+					// The lab's own "stuck" pod; nothing else here has one.
+					_, _ = res.Patch(ctx, o.GetName(), types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{FieldManager: fieldManager})
+				}
 			}
 			if err := res.Delete(ctx, o.GetName(), opts); err != nil && !apierrors.IsNotFound(err) {
 				return fmt.Errorf("delete %s/%s: %w", strings.ToLower(kind), o.GetName(), err)
@@ -552,6 +622,9 @@ func resetNamespace(ctx context.Context, t *target, step func(string)) error {
 		}
 		// Pods recreated by a controller that was still terminating.
 		for _, p := range pods.Items {
+			if len(p.Finalizers) > 0 {
+				_, _ = t.kube.CoreV1().Pods(Namespace).Patch(ctx, p.Name, types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{FieldManager: fieldManager})
+			}
 			if p.DeletionTimestamp == nil {
 				_ = t.kube.CoreV1().Pods(Namespace).Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &zero})
 			}

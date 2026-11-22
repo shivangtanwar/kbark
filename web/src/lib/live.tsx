@@ -20,7 +20,7 @@ interface Live {
   toggleTheme: () => void;
   toasts: Toast[];
   toast: (text: string, error?: boolean) => void;
-  act: (id: string, verb: 'approve' | 'reject' | 'rollback' | 'replan', reason?: string) => Promise<Incident | null>;
+  act: (id: string, verb: 'approve' | 'reject' | 'rollback' | 'replan', reason?: string, standing?: boolean) => Promise<Incident | null>;
   signIn: (username: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -93,10 +93,10 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const signer = me?.authEnabled ? (me.user?.name ?? '') : operator.trim();
   const canApprove = me?.authEnabled ? me.user?.role === 'approver' || me.user?.role === 'admin' : true;
 
-  const act = useCallback<Live['act']>(async (id, verb, reason) => {
+  const act = useCallback<Live['act']>(async (id, verb, reason, standing) => {
     try {
-      const inc = await api.act(id, verb, { operator: signer, reason });
-      toast(DONE[verb]);
+      const inc = await api.act(id, verb, { operator: signer, reason, standing });
+      toast(standing ? 'Approved and applied. The same fix will be applied automatically next time.' : DONE[verb]);
       await refresh();
       return inc;
     } catch (e) {

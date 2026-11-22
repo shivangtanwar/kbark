@@ -77,6 +77,9 @@ type Engine struct {
 	lastSaved  []byte
 	// retried records when each no-fix incident was last re-planned.
 	retried map[string]time.Time
+	// standing holds the standing approvals; see standing.go.
+	standing []*Standing
+	standSeq int
 
 	bg     context.Context
 	wg     sync.WaitGroup
@@ -293,6 +296,7 @@ func (e *Engine) plan(ctx context.Context, id, actor string) {
 				i.ExplainStarted, i.Explanation, i.ExplanationState, i.ExplanationNote = false, "", incident.ExplainPending, ""
 			}
 			i.Action, i.ManualReason = p.Action, ""
+			i.StandingAllowed = d.Standing && p.Action.Risk == "low"
 			return incident.StateProposed, actor, p.Action.Title, nil
 		}
 		if i.State == incident.StateManual && i.ManualReason == p.Manual {
@@ -305,21 +309,60 @@ func (e *Engine) plan(ctx context.Context, id, actor string) {
 	if err == nil && !updated.ExplainStarted {
 		e.explain(updated)
 	}
+	if err == nil && updated.State == incident.StateProposed {
+		// A person already approved this kind of fix for this workload.
+		if st := e.matchStanding(updated, now); st != nil {
+			_, _ = e.approve(ctx, id, st.Actor(), ApproveOptions{}, st)
+		}
+	}
 }
 
 // Approve applies the proposed fix on behalf of a named operator and
 // starts verification. This is the only path to a cluster write.
 func (e *Engine) Approve(ctx context.Context, id, operator string) (*incident.Incident, error) {
+	return e.ApproveWith(ctx, id, operator, ApproveOptions{})
+}
+
+// ApproveOptions are the choices a person makes while approving.
+type ApproveOptions struct {
+	// Standing also grants a standing approval: the same kind of fix
+	// may be applied to the same workload without asking again.
+	Standing bool
+}
+
+// ApproveWith is Approve with options.
+func (e *Engine) ApproveWith(ctx context.Context, id, operator string, opts ApproveOptions) (*incident.Incident, error) {
+	return e.approve(ctx, id, operator, opts, nil)
+}
+
+// approve applies the proposed fix. via is the standing approval the
+// fix is applied under, or nil when a person approved it just now.
+func (e *Engine) approve(ctx context.Context, id, operator string, opts ApproveOptions, via *Standing) (*incident.Incident, error) {
 	operator = strings.TrimSpace(operator)
 	if operator == "" {
 		return nil, ErrOperatorRequired
+	}
+	if opts.Standing {
+		cur, err := e.store.Get(id)
+		if err != nil {
+			return nil, err
+		}
+		if !e.standingAllowed(cur) {
+			return nil, ErrStandingNotAllowed
+		}
 	}
 	// Claim the incident first so two approvals cannot both apply.
 	inc, err := e.store.Update(id, time.Now(), func(i *incident.Incident) (incident.State, string, string, error) {
 		if i.State != incident.StateProposed || i.Action == nil {
 			return "", "", "", incident.ErrWrongState
 		}
-		return incident.StateApplying, operator, "approved: " + i.Action.Title, nil
+		note := "approved: " + i.Action.Title
+		if via != nil {
+			i.StandingID = via.ID
+			note = fmt.Sprintf("applied automatically under standing approval %s, granted by %s on %s: %s",
+				via.ID, via.GrantedBy, via.GrantedAt.UTC().Format("2 Jan 2006"), i.Action.Title)
+		}
+		return incident.StateApplying, operator, note, nil
 	})
 	if err != nil {
 		return nil, err
@@ -334,13 +377,20 @@ func (e *Engine) Approve(ctx context.Context, id, operator string) (*incident.In
 		_, _ = e.store.Update(id, time.Now(), func(*incident.Incident) (incident.State, string, string, error) {
 			return incident.StateProposed, "kbark", "not applied: the target changed after the proposal was shown", nil
 		})
-		e.plan(ctx, id, "kbark")
+		if via == nil {
+			// Under a standing approval the next scan re-plans a stale
+			// proposal anyway; planning here would recurse.
+			e.plan(ctx, id, "kbark")
+		}
 		return nil, ErrRefreshed
 	}
 	if err != nil {
 		_, _ = e.store.Update(id, time.Now(), func(*incident.Incident) (incident.State, string, string, error) {
 			return incident.StateFailed, "kbark", "the change could not be applied: " + err.Error(), nil
 		})
+		if via != nil {
+			_, _ = e.revoke(via.ID, "kbark", "a fix under it could not be applied ("+id+")")
+		}
 		return nil, fmt.Errorf("apply: %w", err)
 	}
 
@@ -353,6 +403,12 @@ func (e *Engine) Approve(ctx context.Context, id, operator string) (*incident.In
 		return nil, err
 	}
 	e.store.Note(id, "applied", operator, incident.AppliedPrefix+inc.Action.Title, time.Now())
+	if via != nil {
+		e.markUsed(via.ID, id, time.Now())
+	}
+	if opts.Standing {
+		e.grant(inc, operator, time.Now())
+	}
 
 	e.wg.Add(1)
 	go func() {
@@ -408,6 +464,11 @@ func (e *Engine) verify(id string) {
 				}
 				return incident.StateFailed, "kbark", note, nil
 			})
+			if inc.StandingID != "" {
+				// Trust that was extended on the strength of past
+				// results ends with the first result that breaks it.
+				_, _ = e.revoke(inc.StandingID, "kbark", "a fix applied under it failed verification ("+id+")")
+			}
 			return
 		}
 	}

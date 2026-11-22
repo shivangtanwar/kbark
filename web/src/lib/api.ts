@@ -25,6 +25,7 @@ export interface Incident {
   container?: string; init?: boolean; probe?: string;
   evidence: Evidence[]; pods: string[];
   state: IncidentState; action?: Action; manualReason?: string; canRollback: boolean;
+  standingAllowed?: boolean; standingID?: string;
   explanation?: string; explanationState: 'pending' | 'ready' | 'unavailable' | 'error'; explanationNote?: string;
   openedAt: string; updatedAt: string; closedAt?: string; lastSeen: string;
   history: HistoryEntry[];
@@ -41,7 +42,14 @@ export interface PodRow {
   health: 'healthy' | 'failing' | 'pending' | 'done'; families?: string[];
 }
 export interface Info { version: string; ai: string; auditPath: string; statePath: string; publicURL: string; demo?: boolean }
-export interface State { info: Info; now: string; clusters: ClusterSummary[]; pods: PodRow[]; incidents: Incident[] }
+/** A named person's decision that one low-risk fix may be applied to one workload without asking again. */
+export interface Standing {
+  id: string; cluster: string; namespace: string; workload: Ref; action: string;
+  grantedBy: string; grantedAt: string; grantedOn: string; expiresAt: string;
+  uses: number; lastUsed?: string; lastIncident?: string;
+  revokedAt?: string; revokedBy?: string; revokeReason?: string;
+}
+export interface State { info: Info; now: string; clusters: ClusterSummary[]; pods: PodRow[]; incidents: Incident[]; standing?: Standing[] }
 
 export interface AuditEntry {
   time: string; incident: string; cluster: string; namespace: string; workload: string;
@@ -49,8 +57,8 @@ export interface AuditEntry {
 }
 export interface Sample { t: string; cluster: string; healthy: number; failing: number; pending: number; open: number }
 
-export interface PolicyRule { name?: string; clusters?: string[]; namespaces?: string[]; mode?: string; actions?: string[]; memory_ceiling?: string }
-export interface Policy { defaults: { memory_ceiling: string; max_attempts: number; attempt_window: string }; rules: PolicyRule[] | null; source: string }
+export interface PolicyRule { name?: string; clusters?: string[]; namespaces?: string[]; mode?: string; actions?: string[]; memory_ceiling?: string; standing_approvals?: string }
+export interface Policy { defaults: { memory_ceiling: string; max_attempts: number; attempt_window: string; standing_approvals?: string; standing_ttl?: string }; rules: PolicyRule[] | null; source: string }
 export interface NotifyStatus { enabled: boolean; host?: string; events?: string[]; sent: number; failed: number; dropped: number; lastError?: string }
 export interface Settings { info: Info; policy: Policy; notify: NotifyStatus; authEnabled: boolean; users?: User[]; clusters: string[] }
 
@@ -83,8 +91,9 @@ export const api = {
   audit: () => request<{ path: string; entries: AuditEntry[] }>('/api/audit'),
   history: (window: string) => request<{ window: string; samples: Sample[] }>(`/api/history?window=${window}`),
   settings: () => request<Settings>('/api/settings'),
+  revokeStanding: (id: string, data: { operator?: string; reason?: string }) => post<Standing>(`/api/standing/${encodeURIComponent(id)}/revoke`, data),
   demo: () => request<Demo>('/api/demo'),
   demoRun: (cluster: string, scenario: string) => post<Demo>(`/api/demo/${encodeURIComponent(cluster)}/${encodeURIComponent(scenario)}`, {}),
-  act: (id: string, verb: 'approve' | 'reject' | 'rollback' | 'replan', data: { operator?: string; reason?: string }) =>
+  act: (id: string, verb: 'approve' | 'reject' | 'rollback' | 'replan', data: { operator?: string; reason?: string; standing?: boolean }) =>
     post<Incident>(`/api/incidents/${encodeURIComponent(id)}/${verb}`, data),
 };

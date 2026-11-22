@@ -31,6 +31,8 @@ export const EVENTS: Record<string, { label: string; tone: Tone }> = {
   'rolled-back': { label: 'Rolled back',        tone: 'idle' },
   'resolved':    { label: 'Cleared on its own', tone: 'ok' },
   'demo':        { label: 'Demo step',          tone: 'idle' },
+  'standing-granted': { label: 'Standing approval granted', tone: 'person' },
+  'standing-revoked': { label: 'Standing approval revoked', tone: 'idle' },
 };
 
 export const FAMILIES: Record<string, string> = {

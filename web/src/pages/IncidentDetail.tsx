@@ -42,11 +42,12 @@ function Decision({ i }: { i: Incident }) {
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<'approve' | 'rollback' | null>(null);
   const [reason, setReason] = useState('');
+  const [standing, setStanding] = useState(false);
   const a = i.action;
 
   const run = async (verb: 'approve' | 'reject' | 'rollback' | 'replan') => {
     setBusy(true); setConfirm(null);
-    await act(i.id, verb, verb === 'reject' ? reason : undefined);
+    await act(i.id, verb, verb === 'reject' ? reason : undefined, verb === 'approve' && standing);
     setBusy(false);
   };
   const who = (
@@ -75,12 +76,21 @@ function Decision({ i }: { i: Incident }) {
           <div className="mt-3 rounded-lg border border-line">
             <Rows rows={[['Cluster', i.cluster], ['Target', `${a.targetKind.toLowerCase()}/${a.targetName}`], ['Reversible', a.reversible ? 'Yes, exactly' : 'No'], ['Recorded as', signer]]} />
           </div>
+          {i.standingAllowed && (
+            <label className="mt-3 flex cursor-pointer items-start gap-2.5 rounded-lg border border-line p-3">
+              <input type="checkbox" className="mt-0.5 size-4 accent-[var(--accent)]" checked={standing} onChange={(e) => setStanding(e.target.checked)} />
+              <span className="text-[13px] leading-relaxed">
+                <b className="font-medium">Also apply this automatically next time</b>
+                <span className="block text-fg-2">If kbark proposes “{actionName(a.type)}” for {workloadName(i)} again, it is applied without asking, recorded under your name. It stops after 30 days, when anyone revokes it in Settings, or the first time such a fix fails.</span>
+              </span>
+            </label>
+          )}
         </Dialog>
       </Card>
     );
   }
   if (i.state === 'applying') {
-    return <Card><CardHeader title="Decision" /><CardBody className="flex flex-col gap-3"><div><Pill tone="warn">Applied, verifying</Pill></div>{fine('Waiting for the rollout to finish and the failure to stay clear.')}</CardBody></Card>;
+    return <Card><CardHeader title="Decision" /><CardBody className="flex flex-col gap-3"><div><Pill tone="warn">Applied, verifying</Pill></div>{fine('Waiting for the rollout to finish and the failure to stay clear.')}{i.standingID && fine(`Applied without a click, under standing approval ${i.standingID}.`)}</CardBody></Card>;
   }
   if (i.state === 'verified' || i.state === 'failed') {
     return (
@@ -90,6 +100,7 @@ function Decision({ i }: { i: Incident }) {
           {i.state === 'verified' && i.closedAt
             ? <div><div className="text-xs text-fg-3">Recovered in</div><div className="num text-[22px] font-semibold tracking-tight">{duration(new Date(i.closedAt).getTime() - new Date(i.openedAt).getTime())}</div></div>
             : <div><Pill tone="bad">Failure did not clear</Pill></div>}
+          {i.standingID && fine(`Applied without a click, under standing approval ${i.standingID}. The timeline names who granted it.`)}
           {i.canRollback && <>
             {who}
             <Button disabled={busy || !!blocked} onClick={() => setConfirm('rollback')}>Roll back this change</Button>

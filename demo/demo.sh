@@ -9,7 +9,8 @@
 #
 # Scenarios: oom, bad-image, crash, missing-config, fix-config, slow-start,
 #            cordon, evicted, selector, never-pull, disk, slow-ready,
-#            no-account, stuck-pod, sts-crash
+#            no-account, stuck-pod, sts-crash, ds-crash, failed-job,
+#            stuck-finalizer, node-down (multi-node clusters only)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,6 +99,27 @@ cmd_break() {
       [ -n "$pod" ] || { echo "no running sessions pod; run 'up' or 'reset' first" >&2; exit 1; }
       k -n "$NS" annotate pod "$pod" kbark.dev/demo-state=corrupt --overwrite >/dev/null
       echo "marked the local state of $pod corrupt (the pod notices within about a minute)" ;;
+    ds-crash)
+      k apply -f "$FIX/agent-v1.yaml"
+      k -n "$NS" rollout status daemonset/node-agent --timeout=120s
+      k apply -f "$FIX/agent-v2.yaml" ;;
+    failed-job)
+      k -n "$NS" delete job nightly-report --ignore-not-found --wait=true >/dev/null
+      k apply -f "$FIX/failed-job.yaml" ;;
+    stuck-finalizer)
+      k apply -f "$FIX/stuck-finalizer.yaml"
+      k -n "$NS" delete pod export-7f6c9 --wait=false ;;
+    node-down)
+      # Stops one worker node of a k3d cluster, so its pods hang in
+      # Terminating once Kubernetes evicts them. Needs a multi-node
+      # cluster whose nodes are Docker containers (k3d or Kind).
+      local node
+      node="$(k get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')"
+      [ -n "$node" ] || { echo "this cluster has no worker node to stop" >&2; exit 1; }
+      k apply -f "$FIX/node-down.yaml"
+      k -n "$NS" rollout status deploy/edge --timeout=120s
+      docker stop "$node" >/dev/null
+      echo "stopped node $node; start it again with: docker start $node" ;;
     sts-crash)
       k apply -f "$FIX/ledger-v1.yaml"
       k -n "$NS" rollout status statefulset/ledger --timeout=90s
@@ -110,6 +132,7 @@ cmd_break() {
 cmd_reset() {
   CTX="${1:-$DEFAULT_CTX}"
   for n in $(k get nodes -o name); do k uncordon "$n" >/dev/null; done
+  k -n "$NS" patch pod export-7f6c9 --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
   k delete namespace "$NS" --ignore-not-found --wait=true
   baseline
 }
@@ -131,5 +154,5 @@ case "${1:-}" in
   reset) shift; cmd_reset "$@" ;;
   status) cmd_status ;;
   down) cmd_down ;;
-  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

@@ -141,7 +141,12 @@ type Incident struct {
 	Action       *Action `json:"action,omitempty"`
 	ManualReason string  `json:"manualReason,omitempty"`
 	CanRollback  bool    `json:"canRollback"`
-	Undo         *Undo   `json:"-"`
+	// StandingAllowed reports that policy permits a standing approval
+	// for the proposed action. StandingID names the standing approval
+	// the fix was applied under, when no person clicked this time.
+	StandingAllowed bool   `json:"standingAllowed,omitempty"`
+	StandingID      string `json:"standingID,omitempty"`
+	Undo            *Undo  `json:"-"`
 
 	Explanation      string `json:"explanation,omitempty"`
 	ExplanationState string `json:"explanationState"`

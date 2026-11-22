@@ -86,6 +86,9 @@ type persisted struct {
 	Saved   time.Time     `json:"saved"`
 	Store   incident.Dump `json:"store"`
 	Samples []Sample      `json:"samples"`
+	// Standing approvals and the counter their IDs come from.
+	Standing    []Standing `json:"standing,omitempty"`
+	StandingSeq int        `json:"standingSeq,omitempty"`
 }
 
 // Save writes incidents and trend samples to StatePath, atomically, if
@@ -96,8 +99,13 @@ func (e *Engine) Save() error {
 	}
 	e.mu.RLock()
 	samples := append([]Sample(nil), e.samples...)
+	standing := make([]Standing, 0, len(e.standing))
+	for _, st := range e.standing {
+		standing = append(standing, *st)
+	}
+	seq := e.standSeq
 	e.mu.RUnlock()
-	p := persisted{Version: 1, Store: e.store.Dump(), Samples: samples}
+	p := persisted{Version: 1, Store: e.store.Dump(), Samples: samples, Standing: standing, StandingSeq: seq}
 	body, err := json.Marshal(p)
 	if err != nil {
 		return err
@@ -175,6 +183,11 @@ func (e *Engine) Restore() (int, error) {
 		if s.T.After(cut) {
 			e.samples = append(e.samples, s)
 		}
+	}
+	e.standing, e.standSeq = e.standing[:0], p.StandingSeq
+	for i := range p.Standing {
+		st := p.Standing[i]
+		e.standing = append(e.standing, &st)
 	}
 	e.mu.Unlock()
 	return len(kept), nil

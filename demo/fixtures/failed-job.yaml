@@ -1,0 +1,22 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nightly-report
+  namespace: kbark-demo
+  labels: {app: nightly-report}
+spec:
+  # Two attempts, both fail, and the Job gives up.
+  backoffLimit: 1
+  template:
+    metadata:
+      labels: {app: nightly-report}
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: report
+          image: busybox:1.36
+          command: ["sh", "-c", "echo building report for 2026-11-22; echo \"ERROR: warehouse query failed: relation sales_daily does not exist\"; exit 1"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
