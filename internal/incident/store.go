@@ -165,6 +165,13 @@ func (s *Store) Observe(cluster string, obs []fleet.Observation, now time.Time) 
 			continue
 		}
 		if now.Sub(inc.LastSeen) >= ResolveAfter {
+			if inc.State == StatePullRequest {
+				// The fix went in at the source; this is it landing.
+				s.transition(inc, StateVerified, "kbark", "verified: the failure cleared after the pull request; kbark changed nothing in the cluster", now)
+				delete(s.open, k)
+				changed = true
+				continue
+			}
 			s.transition(inc, StateResolved, "kbark", "the failure is no longer observed", now)
 			delete(s.open, k)
 			changed = true

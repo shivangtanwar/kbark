@@ -20,7 +20,7 @@ interface Live {
   toggleTheme: () => void;
   toasts: Toast[];
   toast: (text: string, error?: boolean) => void;
-  act: (id: string, verb: 'approve' | 'reject' | 'rollback' | 'replan', reason?: string, standing?: boolean) => Promise<Incident | null>;
+  act: (id: string, verb: 'approve' | 'reject' | 'rollback' | 'replan' | 'pull-request', reason?: string, standing?: boolean) => Promise<Incident | null>;
   signIn: (username: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -38,6 +38,7 @@ const DONE: Record<string, string> = {
   reject: 'Rejected. Nothing was changed.',
   rollback: 'Rolled back.',
   replan: 'Planned again.',
+  'pull-request': 'Pull request opened. Nothing was changed in the cluster.',
 };
 
 export function LiveProvider({ children }: { children: ReactNode }) {

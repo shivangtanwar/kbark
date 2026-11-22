@@ -68,7 +68,9 @@ func oomHarness(t *testing.T, cfg Config) *harness {
 	cfg.Interval = 10 * time.Millisecond
 	cfg.VerifyHold = 60 * time.Millisecond
 	cfg.VerifyTimeout = 600 * time.Millisecond
-	cfg.Planner = &remediate.Planner{MemoryCeiling: resource.MustParse("2Gi")}
+	if cfg.Planner == nil {
+		cfg.Planner = &remediate.Planner{MemoryCeiling: resource.MustParse("2Gi")}
+	}
 	e := New([]*fleet.Cluster{c}, store, cfg, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})

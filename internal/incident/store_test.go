@@ -136,3 +136,29 @@ func TestIncidentWithoutPodsSerializesAnEmptyList(t *testing.T) {
 		t.Fatalf("want an empty list for pods, got %s", raw)
 	}
 }
+
+func TestFailureClearingAfterAPullRequestIsVerified(t *testing.T) {
+	s := NewStore(nil, nil)
+	ref := fleet.Ref{Kind: "Deployment", Name: "cart"}
+	obs := []fleet.Observation{{
+		Key: fleet.Key("shop", ref, detect.FamilyOOM), Namespace: "shop", Workload: ref, Pods: []string{"cart-1"},
+		Finding: detect.Finding{Family: detect.FamilyOOM, Summary: "killed"},
+	}}
+	t0 := time.Now()
+	inc := s.Observe("a", obs, t0)[0]
+	if _, err := s.Update(inc.ID, t0, func(i *Incident) (State, string, string, error) {
+		i.PullRequest = &PullRequest{Repo: "acme/shop", Number: 41, State: "open"}
+		return StatePullRequest, "asha", "pull request #41 opened", nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Still failing: the incident keeps its place, no duplicate opens.
+	if created := s.Observe("a", obs, t0.Add(time.Minute)); len(created) != 0 {
+		t.Fatalf("a second incident opened while the pull request was pending: %+v", created)
+	}
+	s.Observe("a", nil, t0.Add(2*time.Minute+ResolveAfter))
+	got, _ := s.Get(inc.ID)
+	if got.State != StateVerified || got.ClosedAt == nil || !strings.Contains(got.History[len(got.History)-1].Note, "changed nothing in the cluster") {
+		t.Fatalf("after the failure cleared: %s, %+v", got.State, got.History[len(got.History)-1])
+	}
+}

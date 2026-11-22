@@ -19,6 +19,14 @@ function stepsFor(i: Incident): Step[] {
   out.push({ label: 'Fix proposed', time: at('proposed'), done: !!at('proposed'), now: i.state === 'proposed' });
   if (i.state === 'rejected') return [...out, { label: 'Rejected', time: at('rejected'), now: true, tone: 'idle' }];
   if (i.state === 'resolved') return [...out, { label: 'Cleared on its own', time: at('resolved'), now: true, tone: 'ok' }];
+  const pr = i.history.find((h) => h.state === 'pull-request');
+  if (pr && !approved) {
+    // The fix went to the source repository instead of the cluster.
+    out.push({ label: `Pull request by ${pr.actor}`, time: pr.time, done: true, now: i.state === 'pull-request' && i.pullRequest?.state !== 'merged' });
+    out.push({ label: 'Merged', done: i.pullRequest?.state === 'merged', now: i.state === 'pull-request' && i.pullRequest?.state === 'merged' });
+    out.push({ label: 'Verified', time: i.state === 'verified' ? at('verified') : undefined, now: i.state === 'verified', tone: i.state === 'verified' ? 'ok' : undefined });
+    return out;
+  }
   out.push({ label: approved ? `Approved by ${approved.actor}` : 'Approved', time: approved?.time, done: !!approved, now: i.state === 'applying' });
   const end = ({ verified: 'Verified', failed: 'Not verified', 'rolled-back': 'Rolled back' } as Record<string, string>)[i.state];
   out.push({ label: end ?? 'Verified', time: end ? at(i.state) : undefined, now: !!end, tone: end ? tone : undefined });

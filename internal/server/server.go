@@ -468,6 +468,8 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request) {
 	switch r.PathValue("verb") {
 	case "approve":
 		inc, err = s.Engine.ApproveWith(ctx, id, req.Operator, autofix.ApproveOptions{Standing: req.Standing})
+	case "pull-request":
+		inc, err = s.Engine.OpenPullRequest(ctx, id, req.Operator)
 	case "reject":
 		inc, err = s.Engine.Reject(id, req.Operator, req.Reason)
 	case "rollback":
@@ -571,6 +573,8 @@ func statusFor(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, autofix.ErrOperatorRequired):
 		return http.StatusBadRequest
+	case errors.Is(err, autofix.ErrNoSource):
+		return http.StatusConflict
 	case errors.Is(err, autofix.ErrStandingNotAllowed):
 		return http.StatusForbidden
 	case errors.Is(err, autofix.ErrStandingNotFound):

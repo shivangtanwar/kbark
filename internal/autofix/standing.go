@@ -84,7 +84,9 @@ func (e *Engine) Standings() []Standing {
 // standingAllowed reports whether policy permits a standing approval
 // for this incident's proposed action.
 func (e *Engine) standingAllowed(inc *incident.Incident) bool {
-	if inc.Action == nil || inc.Action.Risk != "low" {
+	// A workload with a Git source should be fixed there; applying
+	// live without anyone looking would be silent drift.
+	if inc.Action == nil || inc.Action.Risk != "low" || inc.Action.Source != nil {
 		return false
 	}
 	d := e.cfg.Policy.For(inc.Cluster, inc.Namespace)

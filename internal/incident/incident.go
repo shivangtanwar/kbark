@@ -26,6 +26,10 @@ const (
 	StateRejected State = "rejected"
 	// StateApplying: an approved fix has been written and is being verified.
 	StateApplying State = "applying"
+	// StatePullRequest: the fix was sent to the workload's source
+	// repository as a pull request and kbark is waiting for it to be
+	// merged and synced. Nothing was written to the cluster.
+	StatePullRequest State = "pull-request"
 	// StateVerified: the fix was applied and the failure cleared.
 	StateVerified State = "verified"
 	// StateFailed: the fix was applied (or attempted) and the failure remains.
@@ -89,8 +93,37 @@ type Action struct {
 	Warnings   []string          `json:"warnings,omitempty"`
 	Reversible bool              `json:"reversible"`
 
+	// Source, when set, is where this object's manifest lives in Git.
+	// The fix can then be proposed there as a pull request instead of
+	// being applied live.
+	Source *Source `json:"source,omitempty"`
+
 	// Template is the pod template a rollback restores. Internal.
 	Template []byte `json:"-"`
+}
+
+// Source locates a manifest in a Git repository. It is read from the
+// object's kbark.dev/git-* annotations.
+type Source struct {
+	Repo   string `json:"repo"`             // owner/name
+	Branch string `json:"branch,omitempty"` // "" means the default branch
+	Path   string `json:"path"`
+}
+
+// Annotations that declare where an object's manifest lives.
+const (
+	AnnotationGitRepo   = "kbark.dev/git-repo"
+	AnnotationGitPath   = "kbark.dev/git-path"
+	AnnotationGitBranch = "kbark.dev/git-branch"
+)
+
+// PullRequest is a fix that was proposed at the source.
+type PullRequest struct {
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
+	URL    string `json:"url"`
+	// State is open, merged or closed, as last seen.
+	State string `json:"state"`
 }
 
 // Undo is what is needed to reverse an applied action.
@@ -144,6 +177,9 @@ type Incident struct {
 	// StandingAllowed reports that policy permits a standing approval
 	// for the proposed action. StandingID names the standing approval
 	// the fix was applied under, when no person clicked this time.
+	// PullRequest is set once the fix was sent to the source repository.
+	PullRequest *PullRequest `json:"pullRequest,omitempty"`
+
 	StandingAllowed bool   `json:"standingAllowed,omitempty"`
 	StandingID      string `json:"standingID,omitempty"`
 	Undo            *Undo  `json:"-"`
@@ -188,6 +224,10 @@ func (i *Incident) clone() *Incident {
 	if i.ClosedAt != nil {
 		t := *i.ClosedAt
 		c.ClosedAt = &t
+	}
+	if i.PullRequest != nil {
+		pr := *i.PullRequest
+		c.PullRequest = &pr
 	}
 	return &c
 }

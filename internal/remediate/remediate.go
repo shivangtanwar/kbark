@@ -51,6 +51,9 @@ type Planner struct {
 	// StorageCeiling is the largest ephemeral-storage limit kbark will
 	// propose. Zero means 2Gi.
 	StorageCeiling resource.Quantity
+	// GitOps attaches the manifest's Git location to a proposal when
+	// the object declares one, so the fix can be sent as a pull request.
+	GitOps bool
 }
 
 // Plan is the outcome of planning: exactly one of Action or Manual is set.
@@ -749,7 +752,29 @@ func (p *Planner) finish(ctx context.Context, c *fleet.Cluster, inc *incident.In
 	if tool := managedBy(res.Meta); tool != "" {
 		a.Warnings = append(a.Warnings, fmt.Sprintf("This workload is managed by %s. A live change will drift from its source and may be reverted on the next sync; make the same change at the source.", tool))
 	}
+	p.attachSource(a, res.Meta)
 	return Plan{Action: a}
+}
+
+// fileEditable are the actions that can be expressed as an edit to a
+// manifest file. A rollback cannot: the previous revision is not in
+// the file, it is in the repository's history.
+var fileEditable = map[string]bool{
+	incident.ActionSetMemoryLimit: true, incident.ActionSetEphemeralLimit: true, incident.ActionTuneProbe: true,
+	incident.ActionSetPullPolicy: true, incident.ActionFixServiceSelector: true,
+}
+
+// attachSource records where the object's manifest lives in Git, when
+// its annotations say so and the action is one a file edit can express.
+func (p *Planner) attachSource(a *incident.Action, meta *metav1.ObjectMeta) {
+	if !p.GitOps || meta == nil || !fileEditable[a.Type] {
+		return
+	}
+	repo, path := strings.TrimSpace(meta.Annotations[incident.AnnotationGitRepo]), strings.TrimSpace(meta.Annotations[incident.AnnotationGitPath])
+	if repo == "" || path == "" {
+		return
+	}
+	a.Source = &incident.Source{Repo: repo, Path: path, Branch: strings.TrimSpace(meta.Annotations[incident.AnnotationGitBranch])}
 }
 
 // mutation returns the pod-template edit an action stands for. It is
@@ -899,6 +924,7 @@ func (p *Planner) planServiceSelector(ctx context.Context, c *fleet.Cluster, inc
 		Warnings:   []string{"kbark cannot know which side holds the mistake. If the selector is what was intended and the pod labels are wrong, reject this and correct the workload instead."},
 		Reversible: true,
 	}
+	p.attachSource(a, &svc.ObjectMeta)
 	if tool := managedBy(&svc.ObjectMeta); tool != "" {
 		a.Warnings = append(a.Warnings, fmt.Sprintf("This Service is managed by %s. A live change will drift from its source and may be reverted on the next sync; make the same change at the source.", tool))
 	}

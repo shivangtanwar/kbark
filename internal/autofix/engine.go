@@ -47,6 +47,11 @@ type Config struct {
 	// ReplanEvery is how often an incident with no automatic fix is
 	// planned again, in case the situation has changed.
 	ReplanEvery time.Duration
+	// PullRequests, when set, lets a fix be sent to the object's Git
+	// source as a pull request instead of being applied live.
+	PullRequests PullRequests
+	// PublicURL is the console's address, for links in pull requests.
+	PublicURL string
 }
 
 // DefaultProtected are the namespaces kbark never proposes changes in.
@@ -200,6 +205,8 @@ func (e *Engine) Tick(ctx context.Context, now time.Time) {
 			// rollback target, an attempt window expires. Plan again,
 			// quietly unless the answer changes.
 			e.plan(ctx, inc.ID, "kbark")
+		case inc.State == incident.StatePullRequest && e.dueForRetry(inc.ID, now):
+			e.checkPullRequest(ctx, inc)
 		case !inc.ExplainStarted && (inc.State == incident.StateProposed || inc.State == incident.StateManual):
 			e.explain(inc)
 		}
@@ -296,7 +303,7 @@ func (e *Engine) plan(ctx context.Context, id, actor string) {
 				i.ExplainStarted, i.Explanation, i.ExplanationState, i.ExplanationNote = false, "", incident.ExplainPending, ""
 			}
 			i.Action, i.ManualReason = p.Action, ""
-			i.StandingAllowed = d.Standing && p.Action.Risk == "low"
+			i.StandingAllowed = d.Standing && p.Action.Risk == "low" && p.Action.Source == nil
 			return incident.StateProposed, actor, p.Action.Title, nil
 		}
 		if i.State == incident.StateManual && i.ManualReason == p.Manual {

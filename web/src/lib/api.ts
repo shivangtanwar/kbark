@@ -13,10 +13,12 @@ export interface Action {
   params?: Record<string, string>;
   title: string; rationale: string; risk: 'low' | 'medium'; diff: string;
   warnings?: string[]; reversible: boolean;
+  /** Where the object's manifest lives in Git, when it declares so. */
+  source?: { repo: string; branch?: string; path: string };
 }
 export interface HistoryEntry { time: string; state: IncidentState; actor: string; note?: string }
 export type IncidentState =
-  | 'detected' | 'proposed' | 'manual' | 'rejected' | 'applying'
+  | 'detected' | 'proposed' | 'manual' | 'rejected' | 'applying' | 'pull-request'
   | 'verified' | 'failed' | 'rolled-back' | 'resolved';
 
 export interface Incident {
@@ -26,6 +28,7 @@ export interface Incident {
   evidence: Evidence[]; pods: string[];
   state: IncidentState; action?: Action; manualReason?: string; canRollback: boolean;
   standingAllowed?: boolean; standingID?: string;
+  pullRequest?: { repo: string; number: number; url: string; state: 'open' | 'merged' | 'closed' };
   explanation?: string; explanationState: 'pending' | 'ready' | 'unavailable' | 'error'; explanationNote?: string;
   openedAt: string; updatedAt: string; closedAt?: string; lastSeen: string;
   history: HistoryEntry[];
@@ -94,6 +97,6 @@ export const api = {
   revokeStanding: (id: string, data: { operator?: string; reason?: string }) => post<Standing>(`/api/standing/${encodeURIComponent(id)}/revoke`, data),
   demo: () => request<Demo>('/api/demo'),
   demoRun: (cluster: string, scenario: string) => post<Demo>(`/api/demo/${encodeURIComponent(cluster)}/${encodeURIComponent(scenario)}`, {}),
-  act: (id: string, verb: 'approve' | 'reject' | 'rollback' | 'replan', data: { operator?: string; reason?: string; standing?: boolean }) =>
+  act: (id: string, verb: 'approve' | 'reject' | 'rollback' | 'replan' | 'pull-request', data: { operator?: string; reason?: string; standing?: boolean }) =>
     post<Incident>(`/api/incidents/${encodeURIComponent(id)}/${verb}`, data),
 };

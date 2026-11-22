@@ -45,7 +45,7 @@ function Decision({ i }: { i: Incident }) {
   const [standing, setStanding] = useState(false);
   const a = i.action;
 
-  const run = async (verb: 'approve' | 'reject' | 'rollback' | 'replan') => {
+  const run = async (verb: 'approve' | 'reject' | 'rollback' | 'replan' | 'pull-request') => {
     setBusy(true); setConfirm(null);
     await act(i.id, verb, verb === 'reject' ? reason : undefined, verb === 'approve' && standing);
     setBusy(false);
@@ -65,7 +65,11 @@ function Decision({ i }: { i: Incident }) {
         <CardHeader title="Decision" hint={a.risk === 'low' ? 'Low risk' : 'Medium risk'} />
         <CardBody className="flex flex-col gap-3">
           {who}
-          <Button variant="primary" disabled={busy || !!blocked} onClick={() => setConfirm('approve')}>{busy ? 'Applying…' : 'Approve and apply'}</Button>
+          {a.source && <>
+            <Button variant="primary" disabled={busy || !!blocked} onClick={() => run('pull-request')}>{busy ? 'Working…' : 'Open pull request'}</Button>
+            {fine(`This workload is kept in Git (${a.source.repo}, ${a.source.path}). A pull request there changes nothing in the cluster and avoids drift.`)}
+          </>}
+          <Button variant={a.source ? 'default' : 'primary'} disabled={busy || !!blocked} onClick={() => setConfirm('approve')}>{busy && !a.source ? 'Applying…' : a.source ? 'Apply live instead' : 'Approve and apply'}</Button>
           <Input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={200} placeholder="Reason for rejecting (optional)" aria-label="Reason for rejecting" disabled={!!blocked} />
           <Button disabled={busy || !!blocked} onClick={() => run('reject')}>Reject</Button>
           {fine(blocked || (a.reversible ? 'Applies exactly the change shown. Can be rolled back.' : 'Applies exactly the change shown. Cannot be undone.'))}
@@ -86,6 +90,22 @@ function Decision({ i }: { i: Incident }) {
             </label>
           )}
         </Dialog>
+      </Card>
+    );
+  }
+  if (i.state === 'pull-request' && i.pullRequest) {
+    const merged = i.pullRequest.state === 'merged';
+    return (
+      <Card>
+        <CardHeader title="Decision" />
+        <CardBody className="flex flex-col gap-3">
+          <div><Pill tone={merged ? 'ok' : 'warn'}>{merged ? 'Merged, waiting for sync' : 'Pull request open'}</Pill></div>
+          {/* The address comes from the Git host's answer; only ever link to https. */}
+          {i.pullRequest.url.startsWith('https://')
+            ? <a href={i.pullRequest.url} target="_blank" rel="noreferrer noopener" className="break-all text-accent hover:underline">{i.pullRequest.repo} #{i.pullRequest.number}</a>
+            : <Mono>{i.pullRequest.repo} #{i.pullRequest.number}</Mono>}
+          {fine(merged ? 'Merged at the source. This incident closes when the change reaches the cluster and the failure clears.' : 'Nothing was changed in the cluster. This incident closes when the pull request is merged, synced, and the failure clears. If it is closed without merging, the fix is proposed here again.')}
+        </CardBody>
       </Card>
     );
   }

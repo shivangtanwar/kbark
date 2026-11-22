@@ -11,6 +11,7 @@ export const STATES: Record<IncidentState, { label: string; tone: Tone; group: G
   'manual':      { label: 'Needs a person',     tone: 'person', group: 'person' },
   'rejected':    { label: 'Rejected',           tone: 'idle',   group: 'person' },
   'applying':    { label: 'Verifying',          tone: 'warn',   group: 'progress' },
+  'pull-request': { label: 'Waiting for merge',  tone: 'warn',   group: 'progress' },
   'verified':    { label: 'Fixed',              tone: 'ok',     group: 'closed' },
   'failed':      { label: 'Fix failed',         tone: 'bad',    group: 'awaiting' },
   'rolled-back': { label: 'Rolled back',        tone: 'idle',   group: 'closed' },
@@ -31,6 +32,9 @@ export const EVENTS: Record<string, { label: string; tone: Tone }> = {
   'rolled-back': { label: 'Rolled back',        tone: 'idle' },
   'resolved':    { label: 'Cleared on its own', tone: 'ok' },
   'demo':        { label: 'Demo step',          tone: 'idle' },
+  'pull-request': { label: 'Pull request opened', tone: 'warn' },
+  'pull-request-merged': { label: 'Pull request merged', tone: 'ok' },
+  'pull-request-failed': { label: 'Pull request failed', tone: 'bad' },
   'standing-granted': { label: 'Standing approval granted', tone: 'person' },
   'standing-revoked': { label: 'Standing approval revoked', tone: 'idle' },
 };
