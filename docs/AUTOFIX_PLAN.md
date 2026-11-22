@@ -402,6 +402,21 @@ Verified by running:
   128Mi and touched nothing else, noticed the merge, and closed the incident
   as verified once the merged manifest was applied. The cluster was not
   written to by kbark at any point.
+- A managed cloud cluster: GKE Standard, Kubernetes 1.36, two `e2-medium`
+  nodes, with kbark running outside the cluster under the service accounts
+  from `deploy/rbac.yaml` and `deploy/demo-rbac.yaml`. The 22 system pods
+  were all seen as healthy. Fourteen scenarios were injected; eleven
+  proposals were approved and all eleven verified (memory limit, disk
+  limit, three Deployment rollbacks, StatefulSet and DaemonSet rollbacks,
+  readiness timeout, pull policy, Service selector, dead pod record); the
+  missing ConfigMap, the failed Job and the pod held by a finalizer were
+  reported with no fix, as intended. GKE's runtime reports `OOMKilled`
+  exactly, so the inferred path was not needed there.
+- A node failing and coming back, on GKE: one node's virtual machine was
+  stopped. kbark reported the node as not Ready; GKE removed the node and
+  recreated it, and the incident closed by itself about 80 seconds after it
+  opened. No pod was left stuck in Terminating, because GKE deletes the
+  node object and with it the pods; that fix remains exercised on k3s only.
 
 Not verified:
 
@@ -411,11 +426,7 @@ Not verified:
   for the API and against the planner's real output.
 - `--confirm-oom`: the metric parser is tested, but the Kind runtime never
   reports out-of-memory events, so a confirmation has not been observed.
-- A managed cloud cluster (EKS, GKE, AKS). k3s is a different distribution
-  from Kind, but both run in Docker on one machine.
-- A node that comes back: on the laptop a restarted k3s worker did not
-  rejoin, so the node incident was seen closing only when the node was
-  removed.
+- EKS and AKS. GKE is the only managed service tried.
 - Node pressure conditions (memory, disk, PID): classified in tests, not
   produced on a cluster.
 - Refused pod creation for causes other than a missing ServiceAccount (Pod
