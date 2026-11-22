@@ -22,19 +22,34 @@ Out of scope: third-party forks, packages, or distributions; user-supplied confi
 
 `kbark serve` can change cluster state. What bounds that:
 
-- **Nine typed actions, nothing else.** Raise a memory limit, raise an
+- **Ten typed actions, nothing else.** Raise a memory limit, raise an
   ephemeral-storage limit, roll a workload back one revision, relax probe
   timing, change a pull policy from `Never` to `IfNotPresent`, correct a
   Service selector, delete an already-dead pod, replace an unhealthy pod
-  whose siblings are healthy, uncordon a node. They live in `internal/remediate`. There is no shell, no exec, and
+  whose siblings are healthy, force-delete a pod stuck on a dead node,
+  uncordon a node. They live in `internal/remediate`. There is no shell, no exec, and
   no path from model output to an action: the AI provider is given no
   tools in this mode and its text is only displayed.
-- **An approval per change.** The only caller of `remediate.Apply` is
-  `Engine.Approve`. Proposals are validated by the API server as a dry run
+- **A named person behind every change.** `remediate.Apply` is reached
+  only through an approval. By default that is one click per fix. Where
+  policy sets `standing_approvals: low-risk`, an approver may instead
+  approve one low-risk action type for one workload in advance; fixes
+  applied that way are recorded under that person's name, the grant
+  expires, any approver can revoke it, and it is revoked automatically
+  the first time such a fix fails. Medium-risk fixes always need a click.
+- **Pull requests write to Git, not the cluster.** With a GitHub token
+  kbark can open a pull request against a manifest file. The token is
+  read from an environment variable, never logged, and should be scoped
+  to the repositories kbark may propose to (contents and pull requests).
+  Which repository and file is taken from the workload's annotations, so
+  anyone who can annotate a workload can direct a pull request at any
+  repository the token can write to: scope the token accordingly.
+- **Checked before every write.** Proposals are validated by the API server as a dry run
   and bound to the target's UID and generation.
-- **Policy narrows, never widens.** A policy file can make namespaces
-  detect-only or restrict which actions are proposed. It cannot add
-  actions or skip approval.
+- **Policy narrows.** A policy file can make namespaces detect-only or
+  restrict which actions are proposed. It cannot add actions. The one
+  thing it can relax is to allow standing approvals of low-risk fixes,
+  described above; it cannot remove the person.
 - **Least privilege.** `deploy/rbac.yaml` is the full permission set. It has
   no access to Secrets or ConfigMaps. `--confirm-oom` additionally needs
   `get` on `nodes/proxy`, a broad permission that is not in that file.

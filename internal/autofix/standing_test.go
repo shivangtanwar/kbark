@@ -76,6 +76,10 @@ func TestStandingApprovalAppliesTheNextFixAndIsRevokedOnFailure(t *testing.T) {
 	second := h.waitFor("the second incident applied by itself", func(i *incident.Incident) bool {
 		return i.ID != first.ID && (i.State == incident.StateApplying || i.State == incident.StateVerified || i.State == incident.StateFailed)
 	})
+	// The incident is claimed just before the write; give the write a moment.
+	for deadline := time.Now().Add(2 * time.Second); h.limit() != "256Mi" && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if got := h.limit(); got != "256Mi" {
 		t.Fatalf("limit after the automatic fix = %s, want 256Mi", got)
 	}

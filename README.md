@@ -27,7 +27,7 @@ What happens when a pod fails:
 
 1. **Detect.** Detectors written in Go read pod status and events. No AI
    is involved in deciding what is wrong.
-2. **Propose.** A fixed playbook picks one of nine typed fixes, or says
+2. **Propose.** A fixed playbook picks one of ten typed fixes, or says
    that no safe automatic fix exists and why.
 3. **Approve.** The dashboard shows the evidence, an optional AI
    explanation, and the change as a diff validated by the API server as
@@ -50,6 +50,8 @@ What happens when a pod fails:
 | Image absent from the node with pull policy `Never` | Change the policy to `IfNotPresent` |
 | Service selector that nearly matches its pods | Correct the selector |
 | Pods refused at creation on the latest rollout (missing ServiceAccount, Pod Security, LimitRange) | Roll back |
+| Deleted pod stuck Terminating because its node is down | Force-delete it so the controller can replace it |
+| Unhealthy node, failed Job, pod held by a finalizer | None: reported and explained |
 | Storage, quota, credentials, application bugs | None: explained and left to a person |
 
 Around that loop:
@@ -63,6 +65,13 @@ Around that loop:
 - **Policy.** `--policy` sets, per cluster and namespace, which fixes may
   be proposed, a memory ceiling, and detect-only areas. No policy can
   remove the approval step.
+- **Fix at the source.** For a workload that declares its Git location
+  (`kbark.dev/git-repo`, `kbark.dev/git-path` annotations), a proposal can be
+  sent as a pull request instead of being applied live, so the cluster does
+  not drift from Git. Needs a GitHub token in `KBARK_GITHUB_TOKEN`.
+- **Standing approvals.** Off by default. Where policy allows it, an
+  approver can let one low-risk fix apply automatically to one workload
+  the next time, under their name, until it expires, is revoked, or fails.
 - **History.** Incidents and health trends are saved and survive restarts.
 - **Metrics.** `--metrics-addr` (e.g. `127.0.0.1:9108`) serves Prometheus
   metrics on a separate loopback listener.
@@ -176,8 +185,10 @@ with `:profile cheap`, or via the `KBARK_PROFILE` env var.
 ## What kbark deliberately doesn't do
 
 - **No writes without approval.** The terminal UI is read-only. The
-  autofix layer can make nine kinds of change and makes none of them
-  until a named person approves that specific change.
+  autofix layer can make ten kinds of change and makes none of them
+  until a named person approves it: each time by default, or once in
+  advance for a single low-risk fix on a single workload where policy
+  allows standing approvals.
 - **No free-form remediation.** kbark never runs a shell command, execs
   into a container, or executes anything a language model wrote.
 - **No background telemetry.** Your kubeconfig, API key, and cluster
@@ -187,7 +198,7 @@ with `:profile cheap`, or via the `KBARK_PROFILE` env var.
 
 ## Security
 
-- kbark writes to a cluster only through nine typed actions in
+- kbark writes to a cluster only through ten typed actions in
   `internal/remediate`, each after a named approval. `deploy/rbac.yaml`
   is the full permission set.
 - Every payload bound for an AI provider passes through `internal/redact`
