@@ -51,6 +51,10 @@ Each of these was observed on the Kind clusters during development on
 | 19 | From outside the host, the console took several seconds to appear. | The 700 KB script was sent uncompressed; nginx was not configured to compress and neither was kbark. | kbark compresses scripts and styles itself (206 KB on the wire), so it does not depend on the proxy. |
 | 20 | During those seconds the Incidents page said "No incidents match". | The page treated "no data yet" as "no incidents". | A loading placeholder is shown until the first snapshot arrives. |
 | 21 | An explanation quoted "unable to retrieve container logs" as if it were the application's output. | When a container's log file is gone, the kubelet answers successfully with that sentence as the body. | That body is no longer treated as a log. |
+| 22 | A second kind of cluster could not start on the laptop: every k3s node failed with "too many open files". | The kernel's default of 128 inotify instances per user was already used up by the two Kind clusters. Raising it needs root. | One Kind cluster is paused while the k3s cluster runs on the laptop. The server's limit had already been raised by the setup script. |
+| 23 | On the server, k3d could not create its cluster on the Docker network Kind uses. | Not investigated further; the node container stopped logging within a second. | The k3s cluster gets its own network and the kbark container joins both. |
+| 24 | After a stopped k3s worker was started again it never rejoined the cluster on the laptop. | A k3d limitation with restarted agent containers, not something kbark does. | The "node comes back" path was exercised by removing the node object instead; the node incident closed. |
+| 25 | An engine test began failing with "directory not empty" when the machine was busy. | The engine writes its state file once more as it stops, and the test's temporary directory was being removed at the same moment. | The tests now wait for the engine to stop. |
 | 10 | Real evictions cannot be produced safely on a one-node Kind cluster. | Eviction needs a node under memory or disk pressure. | The `evicted` scenario creates a pod that is never scheduled and writes the status the kubelet writes on eviction. kbark's detector and delete action run exactly as they would after a real eviction. Evictions for exceeding a container's own ephemeral-storage limit are real on Kind, and the `disk` scenario uses them. |
 
 Other difficulties the team met outside this build (earlier milestones,
@@ -85,6 +89,9 @@ Two rules apply to every family:
 | 10 | Network and service | Running but unreachable | Correct a Service selector that nearly matches the pods of one workload; otherwise Manual |
 | 11 | Local disk limit | `Evicted`, message names ephemeral storage | Raise the ephemeral-storage limit; the dead records are then handled as family 9 |
 | 12 | Pods refused at creation | Fewer pods than wanted, `FailedCreate` on the controller | Roll back if an accepted revision exists; otherwise Manual (always Manual for a full quota) |
+| 13 | Node not healthy | Node `NotReady`, or memory, disk or PID pressure | Manual: kbark does not repair nodes |
+| 14 | Pod stuck terminating | `Terminating` long past its deadline | Force-delete, only when the pod's node is down; otherwise Manual |
+| 15 | Failed Job | Job condition `Failed` | Manual: a Job cannot be changed once it exists |
 
 Family 5 is not a separate detector: the detectors for families 1 to 4 run
 over init containers as well and mark the finding as an init container.
@@ -357,6 +364,95 @@ quota is always Manual: abandoning the rollout would clear the symptom, but
 the decision is about capacity. kbark never creates ServiceAccounts, loosens
 a security level or edits a quota.
 
+### 13. Node not healthy
+
+**What happens.** A node stops reporting (`NotReady`) or runs short of
+memory, disk or process IDs. Its pods stop being run or start being evicted.
+
+**Common causes.** The machine or its kubelet is down; the node lost its
+network; a disk filled up; too many pods without limits.
+
+**Detection.** The node's `Ready` condition has been false or unknown for
+over a minute, or a pressure condition is true. A node has no namespace, so
+this incident has none. Evidence: the condition, its message, how long it
+has lasted, and how many pods are assigned to the node.
+
+**Fix.** None. kbark cannot repair a machine, and Kubernetes already keeps
+new pods off such a node and evicts the old ones. What kbark adds is the
+incident, the explanation, and the follow-on incidents below: pods the node
+leaves stuck (family 14), dead records (family 9) and pods over their own
+limits (families 1 and 11) each get their own fix.
+
+### 14. Pod stuck terminating
+
+**What happens.** A pod was deleted and stays in `Terminating`. Its
+controller counts it as present, so a Deployment can sit one replica short
+indefinitely.
+
+**Common causes.** The pod's node is down, so no kubelet can confirm the
+containers stopped; a finalizer whose controller never finishes; a process
+that ignores the stop signal under a long grace period.
+
+**Detection.** A pod more than two minutes past its deletion deadline (the
+deadline already includes the pod's own grace period). The cause is refined
+from what else is known: a finalizer on the pod, or a node that is not
+Ready or no longer exists.
+
+**Fix.** `force-delete-pod`, in exactly one case: the node is down, the pod
+has no finalizer, and it does not belong to a StatefulSet. The record is
+deleted with no grace period and a UID precondition, and the controller
+starts a replacement on a healthy node. The proposal is medium risk and
+warns that a node which is only cut off, not off, may still be running the
+old container. In every other case the incident is Manual, with the reason:
+a finalizer is someone's request for cleanup and is not bypassed; on a live
+node the kubelet is still stopping the container; and a StatefulSet pod
+forced off an unreachable node can leave two pods with one identity.
+
+### 15. Failed Job
+
+**What happens.** A Job's pods fail until it runs out of retries
+(`BackoffLimitExceeded`) or time (`DeadlineExceeded`), and the Job stops.
+
+**Common causes.** A bug or a missing dependency in the task; a deadline
+shorter than the work; the same causes as families 1 to 4, inside a Job.
+
+**Detection.** A Job whose `Failed` condition became true within the last
+hour. A Job created by a CronJob is reported against the CronJob, and not at
+all once a later run of that CronJob has succeeded.
+
+**Fix.** None: a Job's pod template cannot be changed after creation, and
+kbark does not create objects. The explanation is built from the failed
+pod's log. For a CronJob the next scheduled run uses the CronJob's current
+template, so a correction there takes effect by itself.
+
+## Fixing at the source: pull requests
+
+A live change to a workload that Argo CD, Flux or a pipeline deploys from
+Git is drift: the next sync may undo it, and the repository no longer says
+what is running. When a workload declares where its manifest lives
+(`kbark.dev/git-repo` and `kbark.dev/git-path` annotations) and kbark has
+been given a token for the Git host, a proposal gains a second option: open
+a pull request with the same change against that file. Nothing is written
+to the cluster. The incident waits, records the merge, and closes as
+verified when the failure clears; a pull request closed without merging
+puts the proposal back in front of a person. This covers the fixes that are
+an edit to a manifest (limits, probe timing, pull policy, Service selector).
+A rollback is not one: the previous revision is in the repository's
+history, not in a file.
+
+## Standing approvals
+
+By default every fix needs a person each time. Where policy sets
+`standing_approvals: low-risk`, an approver may tick "apply this
+automatically next time" while approving a low-risk fix. From then on kbark
+applies that action type to that workload without a click, recorded under
+the approver's name. It is one cluster, one namespace, one workload and one
+action type; it lasts 30 days; anyone who may approve may revoke it; and it
+is revoked automatically the first time a fix applied under it fails
+verification or cannot be applied. The limit on fixes per workload per hour
+still applies. Medium-risk fixes and workloads with a Git source are never
+covered.
+
 ## Why "roll back" appears so often
 
 Most production failures follow a change. When the failing pods all belong
@@ -408,6 +504,11 @@ verification hold (15 seconds; 60 for the probe fix).
 | `sts-crash` | kbark-dev (laptop) | Application crash on a StatefulSet | Roll back revision 2 to 1 and replace the broken pod | Verified | 1m19s |
 | `stuck-pod` | kbark-dev (laptop) | Application crash, one pod of three | Replace the pod | Verified | 26s |
 | The same seven scenarios, kbark on the server with its restricted service account | kbark-dev | As above | As above | All verified; the `disk` follow-up deleted 49 dead records | Not comparable: approval was delayed about 28 minutes |
+| `ds-crash` | kbark-k3s (laptop, three nodes) | Application crash on a DaemonSet | Roll back revision 2 to 1 | Verified | 1m18s |
+| `oom` with "apply automatically next time" ticked, then `oom` again | kbark-k3s (laptop) | Out of memory (inferred) | Memory limit 64Mi to 128Mi, the second time with no click | Both verified; the second 18s after detection | 18s |
+| `node-down` | kbark-k3s (laptop) | Node not Ready; then pod stuck terminating on it | Node: none (Manual). Pod: force-delete | Pod fix verified; replacement ran on another node. Node incident closed when the node was removed | 32s (pod) |
+| `failed-job` | kbark-k3s (laptop) | Failed Job, backoff limit | None (Manual), explained from the pod's log | Left open | — |
+| `stuck-finalizer` | kbark-k3s (laptop) | Pod stuck terminating, finalizer | None (Manual): the finalizer is named and not bypassed | Left open | — |
 
 The recovery times in the laptop rows include about a minute between
 detection and approval, because all proposals were approved together.

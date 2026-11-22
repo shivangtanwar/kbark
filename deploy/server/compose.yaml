@@ -12,7 +12,7 @@ services:
     entrypoint: ["/kbark/bin/kbark"]
     command:
       - serve
-      - --contexts=kbark-dev,kbark-staging
+      - --contexts=kbark-dev,kbark-staging,kbark-k3s
       - --addr=0.0.0.0:8765
       - --public-url=${KBARK_PUBLIC_URL}
       - --trust-proxy
@@ -43,12 +43,16 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 512m
-    networks: [kind, ai]
+    networks: [kind, k3s, ai]
 
 networks:
   # Created by Kind; the cluster API servers are reachable on it by name.
   kind:
     external: true
+  # Created by k3d for the kbark-k3s cluster.
+  k3s:
+    external: true
+    name: k3d-kbark-k3s
   # The network the OpenAI-compatible proxy (LiteLLM) is on.
   ai:
     external: true
