@@ -97,7 +97,7 @@ crash-looping pod looks healthy for a few seconds on every restart.
 
 ### The allowlisted actions
 
-kbark can perform only these nine writes. Each is a typed struct, not a command
+kbark can perform only these ten writes. Each is a typed struct, not a command
 string, so nothing a language model says can become an action.
 
 | Action | API call | Used for | Reversible by |
@@ -111,12 +111,29 @@ string, so nothing a language model says can become an action.
 | `set-ephemeral-storage-limit` | update workload pod template | pods evicted for exceeding their local disk limit | restoring the saved template |
 | `set-image-pull-policy` | update workload pod template (`Never` to `IfNotPresent`) | an image absent from the node that the kubelet may not pull | restoring the saved template |
 | `fix-service-selector` | update the Service's selector | a Service whose selector nearly matches the pods of exactly one workload | restoring the saved selector |
+| `force-delete-pod` | delete pod with no grace period (UID precondition) | a deleted pod stuck Terminating because its node is down; never past a finalizer, never a StatefulSet pod | not reversible; the controller starts a replacement |
 
 `tune-probe` also covers a readiness probe that times out (it raises only
 the timeout), and `rollback-workload` also covers pods that the API server
 refuses to create on the latest revision. A StatefulSet rollback deletes the
 broken pods after restoring the template, because a StatefulSet does not
 replace them by itself.
+
+### Two other ways a fix can travel
+
+- **As a pull request.** A workload annotated with `kbark.dev/git-repo` and
+  `kbark.dev/git-path` is kept in Git. When kbark has a GitHub token
+  (`KBARK_GITHUB_TOKEN`), its proposal offers "Open pull request": the same
+  change is made to the manifest file on a branch and a pull request is
+  opened. kbark writes nothing to the cluster and closes the incident as
+  verified when the failure clears after the merge. Limits, probe timing,
+  pull policy and Service selectors can travel this way; a rollback cannot.
+- **Under a standing approval.** Off by default. Where policy sets
+  `standing_approvals: low-risk`, an approver may let one low-risk action
+  type be applied to one workload without a click, under their name, for 30
+  days. It is revoked by any approver, or automatically the first time such a
+  fix fails. Every fix therefore still traces to a named person's decision;
+  what changes is whether that decision is made once or each time.
 
 ### Guardrails
 
@@ -169,11 +186,12 @@ scope and need to be updated by hand.
 
 ## 4. Development: what was built
 
-- Detectors for eleven failure families (nine from pod state, plus Services
-  without endpoints and pods refused at creation), table-driven tests.
+- Detectors for fourteen failure families: nine from pod state, plus
+  Services without endpoints, pods refused at creation, unhealthy nodes,
+  pods stuck terminating and failed Jobs. Table-driven tests.
 - Multi-cluster watchers over kubeconfig contexts, plus an in-cluster mode.
 - Incident store, audit log, and the scan/plan/approve/verify engine.
-- All nine actions, each with plan, dry-run, apply and (where meaningful)
+- All ten actions, each with plan, dry-run, apply and (where meaningful)
   rollback.
 - The engine plans a "no automatic fix" incident again every 30 seconds
   while the failure is observed, and asks again for an explanation that
@@ -188,12 +206,16 @@ scope and need to be updated by hand.
 - `kbark incidents` terminal client: list, show, approve, reject, rollback.
 - AI explanation through the existing providers or any OpenAI-compatible
   endpoint (`base_url` and `api_key_env` in a profile); optional.
-- Demo environment: `demo/demo.sh` with fifteen scenarios.
+- Demo environment: `demo/demo.sh` with nineteen scenarios, sixteen of them
+  also on the console's Demo lab page.
+- Fixes as pull requests against a workload's Git source, and standing
+  approvals (see section 3).
+- A third demo cluster on k3s with three nodes.
 - Deployment files: `Dockerfile`, `deploy/rbac.yaml`, `deploy/kbark.yaml`.
 
 Not built: an incident screen inside the terminal UI (the CLI client covers
-terminal use), single sign-on, automatic fixes for storage, network,
-credentials and application bugs.
+terminal use), automatic fixes for storage, quotas, credentials, nodes,
+Jobs and application bugs.
 
 ## 5. Deployment
 
@@ -366,12 +388,29 @@ Verified by running:
   one pod of three replaced, and `ledger-1` recreated on revision 1.
 - A local run with AI explanations through the `codex` profile.
 
+- A cluster other than Kind: a three-node k3s cluster (k3d). On it, a
+  DaemonSet rollback verified; a worker node was stopped, kbark reported the
+  node and proposed force-deleting the pod stuck on it, and the replacement
+  ran on another node; a failed Job and a pod held by a finalizer were
+  reported with no fix offered.
+- A standing approval: granted while approving a memory fix, then the same
+  failure injected again was fixed with no click and verified 18 seconds
+  after detection, recorded under the approver's name.
+
 Not verified:
 
 - `--confirm-oom`: the metric parser is tested, but the Kind runtime never
   reports out-of-memory events, so a confirmation has not been observed.
-- DaemonSet rollback on a live cluster (automated test against a fake
-  cluster only).
+- A managed cloud cluster (EKS, GKE, AKS). k3s is a different distribution
+  from Kind, but both run in Docker on one machine.
+- Pull requests against a real GitHub repository: the client is tested
+  against a stand-in for the GitHub API, and the planner's output against
+  the manifest editor, but no pull request has been opened on github.com.
+- A node that comes back: on the laptop a restarted k3s worker did not
+  rejoin, so the node incident was seen closing only when the node was
+  removed.
+- Node pressure conditions (memory, disk, PID): classified in tests, not
+  produced on a cluster.
 - Refused pod creation for causes other than a missing ServiceAccount (Pod
   Security, LimitRange, quota, webhook): classification is tested from
   message text, not produced on a cluster.
@@ -380,4 +419,3 @@ Not verified:
 - `golangci-lint`: the installed binary could not type-check this Go version.
   `go vet` and `gofmt` are clean.
 - The multi-stage `Dockerfile`.
-- Any cluster other than Kind.

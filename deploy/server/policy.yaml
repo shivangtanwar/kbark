@@ -5,6 +5,10 @@ defaults:
   memory_ceiling: 512Mi     # the demo workloads are tiny; keep fixes small
   max_attempts: 2
   attempt_window: 1h
+  # An approver may tick "apply this automatically next time" for a
+  # low-risk fix on one workload. Remove this line to require a click
+  # for every fix (that is the built-in default).
+  standing_approvals: low-risk
 
 rules:
   - name: kbark itself
