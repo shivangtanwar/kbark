@@ -35,6 +35,8 @@ import (
 )
 
 type serveOptions struct {
+	gitTokenEnv    string
+	gitAPIURL      string
 	demo           bool
 	demoKubeconfig string
 	contexts       []string
@@ -96,6 +98,8 @@ func init() {
 	f.StringSliceVar(&serveOpts.notifyEvents, "notify-events", notify.DefaultEvents, "Events that trigger a notification")
 	f.BoolVar(&serveOpts.confirmOOM, "confirm-oom", false, "Confirm inferred out-of-memory kills from the node's kubelet metrics (needs get on nodes/proxy)")
 	f.BoolVar(&serveOpts.trustProxy, "trust-proxy", false, "Take client addresses from X-Real-IP / X-Forwarded-For; set only when all traffic arrives through your reverse proxy")
+	f.StringVar(&serveOpts.gitTokenEnv, "git-token-env", "KBARK_GITHUB_TOKEN", "Environment variable holding a GitHub token. When it is set, a fix for a workload that declares its Git source (kbark.dev/git-repo, kbark.dev/git-path annotations) can be sent as a pull request instead of being applied live")
+	f.StringVar(&serveOpts.gitAPIURL, "git-api-url", "", "GitHub API address, for GitHub Enterprise (default https://api.github.com)")
 	f.BoolVar(&serveOpts.demo, "demo", false, "Enable the demo lab: the console can inject sample failures into the kbark-demo namespace, using the same credentials kbark watches with")
 	f.StringVar(&serveOpts.demoKubeconfig, "demo-kubeconfig", "", "Enable the demo lab with separate credentials: a kubeconfig holding one context per watched cluster, with the same names (see deploy/demo-rbac.yaml)")
 	f.BoolVar(&serveOpts.insecure, "insecure-no-auth", false, "Allow a non-loopback --addr without --auth-file. Anyone who can reach the port can approve changes")
@@ -195,11 +199,14 @@ func runServe(_ *cobra.Command, _ []string) error {
 	if hook != nil {
 		store.OnEvent(hook.Notify)
 	}
+	gitHostClient := buildGitHost(o.gitTokenEnv, o.gitAPIURL)
 	engine := autofix.New(clusters, store, autofix.Config{
 		VerifyTimeout: o.verifyTimeout,
 		VerifyHold:    o.verifyHold,
 		Policy:        pol,
-		Planner:       &remediate.Planner{DryRun: true, ConfirmOOM: o.confirmOOM},
+		Planner:       &remediate.Planner{DryRun: true, ConfirmOOM: o.confirmOOM, GitOps: gitHostClient != nil},
+		PullRequests:  gitHostClient,
+		PublicURL:     o.publicURL,
 		Explainer:     explainer,
 		StatePath:     statePath,
 	}, hub.Notify)
@@ -252,6 +259,9 @@ func runServe(_ *cobra.Command, _ []string) error {
 	}
 	if hook != nil {
 		fmt.Printf("  notify:    webhook at %s\n", hook.Status().Host)
+	}
+	if gitHostClient != nil {
+		fmt.Printf("  git:       pull requests enabled (token from $%s)\n", o.gitTokenEnv)
 	}
 	if demoLab != nil {
 		fmt.Printf("  demo lab:  ON. Administrators can inject sample failures into namespace %s from the console.\n", lab.Namespace)
