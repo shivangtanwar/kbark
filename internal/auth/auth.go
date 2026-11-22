@@ -78,6 +78,12 @@ type Manager struct {
 	sessions map[string]session
 	failures map[string]*attempts
 	now      func() time.Time
+	// sessionPath, when set, keeps sessions across restarts (see
+	// sessions.go). Empty means memory only.
+	sessionPath string
+	// sso, when set, resolves accounts that are not in the users file
+	// (single sign-on). See SetSSOResolver.
+	sso func(username string) (User, bool)
 }
 
 // Load reads and validates a users file.
@@ -175,31 +181,42 @@ func (m *Manager) Login(username, password, client string) (string, User, error)
 	token := hex.EncodeToString(raw)
 	m.mu.Lock()
 	delete(m.failures, key)
-	m.sessions[token] = session{user: u, expires: now.Add(SessionTTL)}
+	m.sessions[tokenKey(token)] = session{user: u, expires: now.Add(SessionTTL)}
 	m.gc(now)
+	m.persistLocked()
 	m.mu.Unlock()
 	return token, u.Public(), nil
 }
 
 // Session returns the user for a token, if the session is still valid.
+// The user is looked up as it stands now, so a role change takes effect
+// without signing in again.
 func (m *Manager) Session(token string) (User, bool) {
 	if token == "" {
 		return User{}, false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.sessions[token]
+	key := tokenKey(token)
+	s, ok := m.sessions[key]
 	if !ok || m.now().After(s.expires) {
-		delete(m.sessions, token)
+		delete(m.sessions, key)
 		return User{}, false
 	}
-	return s.user.Public(), true
+	u, ok := m.userFor(s.user.Username)
+	if !ok {
+		// The account is gone; the session ends with it.
+		delete(m.sessions, key)
+		return User{}, false
+	}
+	return u.Public(), true
 }
 
 // Logout ends a session.
 func (m *Manager) Logout(token string) {
 	m.mu.Lock()
-	delete(m.sessions, token)
+	delete(m.sessions, tokenKey(token))
+	m.persistLocked()
 	m.mu.Unlock()
 }
 
