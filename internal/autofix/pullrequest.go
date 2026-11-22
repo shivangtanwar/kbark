@@ -96,9 +96,14 @@ func prBody(inc *incident.Incident, operator, publicURL string) string {
 	}
 	fmt.Fprintf(&b, "\n**Change:** %s\n\n%s\n", a.Title, a.Rationale)
 	for _, w := range a.Warnings {
-		if !strings.Contains(w, "drift from its source") {
-			fmt.Fprintf(&b, "\n> %s\n", w)
+		if strings.Contains(w, "drift from its source") {
+			continue // the pull request is the answer to that warning
 		}
+		// Proposals speak of kbark's own verification and rollback;
+		// here the change is reviewed and reverted in Git instead.
+		w = strings.ReplaceAll(w, "verification will fail and the change can be rolled back", "the failure will continue after the merge and this change can be reverted")
+		w = strings.ReplaceAll(w, "reject this and correct", "close this and correct")
+		fmt.Fprintf(&b, "\n> %s\n", w)
 	}
 	fmt.Fprintf(&b, "\nRequested by %s through kbark (incident %s", operator, inc.ID)
 	if publicURL != "" {

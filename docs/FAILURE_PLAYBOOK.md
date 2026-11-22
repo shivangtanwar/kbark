@@ -509,6 +509,7 @@ verification hold (15 seconds; 60 for the probe fix).
 | `node-down` | kbark-k3s (laptop) | Node not Ready; then pod stuck terminating on it | Node: none (Manual). Pod: force-delete | Pod fix verified; replacement ran on another node. Node incident closed when the node was removed | 32s (pod) |
 | `failed-job` | kbark-k3s (laptop) | Failed Job, backoff limit | None (Manual), explained from the pod's log | Left open | — |
 | `stuck-finalizer` | kbark-k3s (laptop) | Pod stuck terminating, finalizer | None (Manual): the finalizer is named and not bypassed | Left open | — |
+| `oom` on a workload that declares its Git source | kbark-dev (laptop) | Out of memory (inferred) | Pull request on github.com raising limit and request to 128Mi; merged, then synced by hand | Verified; kbark wrote nothing to the cluster | 1m32s, mostly the merge |
 
 The recovery times in the laptop rows include about a minute between
 detection and approval, because all proposals were approved together.

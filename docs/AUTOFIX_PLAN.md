@@ -396,16 +396,23 @@ Verified by running:
 - A standing approval: granted while approving a memory fix, then the same
   failure injected again was fixed with no click and verified 18 seconds
   after detection, recorded under the approver's name.
+- A fix as a real pull request on github.com (a private scratch
+  repository): kbark detected the out-of-memory failure, opened a pull
+  request whose diff raised the limit and the equal request from 64Mi to
+  128Mi and touched nothing else, noticed the merge, and closed the incident
+  as verified once the merged manifest was applied. The cluster was not
+  written to by kbark at any point.
 
 Not verified:
 
+- Pull requests for the other file-editable fixes (probe timing, pull
+  policy, Service selector, ephemeral storage) on github.com: only the
+  memory fix was opened for real; the others are tested against a stand-in
+  for the API and against the planner's real output.
 - `--confirm-oom`: the metric parser is tested, but the Kind runtime never
   reports out-of-memory events, so a confirmation has not been observed.
 - A managed cloud cluster (EKS, GKE, AKS). k3s is a different distribution
   from Kind, but both run in Docker on one machine.
-- Pull requests against a real GitHub repository: the client is tested
-  against a stand-in for the GitHub API, and the planner's output against
-  the manifest editor, but no pull request has been opened on github.com.
 - A node that comes back: on the laptop a restarted k3s worker did not
   rejoin, so the node incident was seen closing only when the node was
   removed.
